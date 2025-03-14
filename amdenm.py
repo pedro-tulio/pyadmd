@@ -248,13 +248,27 @@ if args == {}:
     parser.error(f"{err}At least one argument must be provided.{std}")
 
 # Store the values
-if 'modefile' in args: modefile = args['modefile'].split('/')[-1]
-if 'psffile' in args: psffile = args['psffile'].split('/')[-1]
-if 'pdbfile' in args: pdbfile = args['pdbfile'].split('/')[-1]
-if 'coorfile' in args: coorfile = args['coorfile'].split('/')[-1]
-if 'velfile' in args: velfile = args['velfile'].split('/')[-1]
-if 'xscfile' in args: xscfile = args['xscfile'].split('/')[-1]
-if 'strfile' in args: strfile = args['strfile'].split('/')[-1]
+if 'modefile' in args:
+    modepath = args['modefile']
+    modefile = args['modefile'].split('/')[-1]
+if 'psffile' in args:
+    psfpath = args['psffile']
+    psffile = args['psffile'].split('/')[-1]
+if 'pdbfile' in args:
+    pdbpath = args['pdbfile']
+    pdbfile = args['pdbfile'].split('/')[-1]
+if 'coorfile' in args:
+    coorpath = args['coorfile']
+    coorfile = args['coorfile'].split('/')[-1]
+if 'velfile' in args:
+    velpath = args['velfile']
+    velfile = args['velfile'].split('/')[-1]
+if 'xscfile' in args:
+    xscpath = args['xscfile']
+    xscfile = args['xscfile'].split('/')[-1]
+if 'strfile' in args:
+    strpath = args['strfile']
+    strfile = args['strfile'].split('/')[-1]
 if 'modes' in args: modes = args['modes']
 if 'energy' in args: energy = args['energy']
 if 'time' in args: time = args['time']
@@ -264,6 +278,27 @@ if 'replicas' in args: replicas = args['replicas']
 # Running options
 if 'run' in args:
     print(f"{pgmnam}{tle}Setup and run aMDeNM simulations{std}\n")
+
+    # Test if the provided files exist
+    file_list = [modepath, psfpath, pdbpath, coorpath, velpath, xscpath, strpath]
+    for file in file_list:
+        if not os.path.isfile(file):
+            print(f"{pgmerr}File {err}{file.split('/')[-1]}{std} not found.")
+            sys.exit()
+        # Test if the provided files are at the input folder and copy them if not
+        if not os.path.isfile(f"{input_dir}/{file.split('/')[-1]}"):
+            shutil.copy(file, input_dir)
+            print(f"{pgmwrn}File {wrn}{file.split('/')[-1]}{std} was copied to inputs folder.")
+
+    # Get some information from the system
+    print(f"{pgmnam}Getting system info.")
+    sys_pdb = mda.Universe(f"{input_dir}/{psffile}", f"{input_dir}/{coorfile}", format="NAMDBIN")
+    N = sys_pdb.atoms.n_atoms                                       # Total atom number
+    sys_mass = sys_pdb.atoms.masses                                 # System atomic mass
+    sys_zeros = sys_pdb.atoms.select_atoms("all")
+    init_coor = sys_pdb.atoms.select_atoms(selection).positions
+    sel_atom = sys_pdb.atoms.select_atoms(selection).n_atoms        # Number of selected atoms
+    sel_mass = sys_pdb.atoms.select_atoms(selection).masses         # Selection atomic mass
 
     # Correction variables definition
     globfreq = cos_alpha = 0.5
@@ -278,36 +313,12 @@ if 'run' in args:
     top = energy * 1.25
     bottom = energy * 0.75
 
-    # Extract NAMD topology and parameters files
-    unzip(f"{input_dir}/namd_toppar.zip", input_dir)
-
-    # Get some information from the system
-    print(f"{pgmnam}Getting system info.")
-    sys_pdb = mda.Universe(f"{input_dir}/{psffile}", f"{input_dir}/{coorfile}", format="NAMDBIN")
-    N = sys_pdb.atoms.n_atoms                                       # Total atom number
-    sys_mass = sys_pdb.atoms.masses                                 # System atomic mass
-    sys_zeros = sys_pdb.atoms.select_atoms("all")
-    init_coor = sys_pdb.atoms.select_atoms(selection).positions
-    sel_atom = sys_pdb.atoms.select_atoms(selection).n_atoms        # Number of selected atoms
-    sel_mass = sys_pdb.atoms.select_atoms(selection).masses         # Selection atomic mass
-
-    # Test if the provided files exist
-    if strfile != '':
-        file_list = [modefile, psffile, pdbfile, coorfile, velfile, xscfile, strfile]
-    else:
-        file_list = [modefile, psffile, pdbfile, coorfile, velfile, xscfile]
-    for file in file_list:
-        if not os.path.isfile(f"{input_dir}/{file}"):
-            print(f"{pgmerr}File {err}{file}{std} not found.")
-            sys.exit()
-        # Test if the provided files are at the input folder and copy them if not
-        if not os.path.isfile(f"{input_dir}/{file}"):
-            shutil.copy(file, input_dir)
-            print(f"{pgmwrn}File {wrn}{file}{std} was copied to inputs folder.")
-
     # Write the normal mode vectors
     print(f"{pgmnam}Writing normal mode vectors {ext}{modes}{std}.")
     write_nm(modes)
+
+    # Extract NAMD topology and parameters files
+    unzip(f"{input_dir}/namd_toppar.zip", input_dir)
 
     #######################
     ### CALL FOR ACTION ###

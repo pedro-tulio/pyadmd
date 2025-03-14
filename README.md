@@ -109,7 +109,7 @@ The MDeNM scripts run some basic analysis at the end of the simulation. Inside e
 
 Please cite the following paper if you are using any Adaptive MDeNM application in your work:
 
-*[Resende-Lara, P. T. et al. Article title. Journal volume(issue), 1-999.](link)*
+[Resende-Lara, P. T. et al. *Adaptive collective motions: a hybrid method to improve conformational sampling with molecular dynamics and normal modes.* bioRxiv. doi: 10.1101/2022.11.29.517349](https://www.biorxiv.org/content/10.1101/2022.11.29.517349)
 
 [Back to top ↩](#)
 * ****
