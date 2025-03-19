@@ -82,7 +82,7 @@ Adaptive MDeNM is distributed as a Python handler script that manage the NAMD si
 
 ### Configuration
 
-One can easily configure an Adaptive MDeNM run by using the configuration file provided in the *inputs* folder. In a terminal, enter the *inputs* folder and type <code>./configure -o</code>, the program will prompt the instructions and automatically edit the files. If something goes wrong during the process, cancel the editing and type <code>./configure -c</code> for clean up and start again. **Note:** make sure that the configuration file is being executed ***within the inputs*** folder.
+One can easily setup and run an Adaptive MDeNM simulation by using this script.
 The configuration process is straightforward. Some technical aspects will be covered in this section in order to facilitate the method comprehension.
 
 - **Energy injection:** the excitation time of Adaptive MdeNM is *0.2 ps*. This means that every *0.2 ps* the system receives the additional amount of energy chosen by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of *0.125 kcal/mol* is sufficient to achieve a large exploration of the conformational space.
