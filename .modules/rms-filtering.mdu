@@ -1,0 +1,255 @@
+* COMBINE NORMAL MODES AND APPLY THE RMSD FILTERING
+* 
+
+DIMENS CHSIZE 3000000 MAXRES 3000000
+
+bomlev -5
+wrnlev -1
+
+! ============================ !
+! READ USER-DEFINED PARAMETERS !
+! ============================ !
+
+! RMSD value for filtering (Å)
+!set rmsthreshold 1
+
+! ==================================== !
+! SETUP THE SYSTEM TO MDENM SIMULATION !
+! ==================================== !
+
+! READ TOPOLOGY AND PARAMETER FILES
+! file to some write information
+open write card unit 22 name /dev/null
+outu 22
+stream ../inputs/charmm_toppar.str
+outu 6
+
+! Read system's psf file
+open read card unit 25 name ../inputs/@psffile
+read psf card unit 25
+close unit 25
+
+! Define the group formed by the atoms considered in PFF NMA calculation
+define PRTN sele segid PRO* end
+set Nprtn ?nsel
+! Define the region of interest to apply the filtering
+define FILT sele segid PRO* .and. type CA end
+set Nfilt ?nsel
+! Define the group formed by the membrane, solvent and ions (not considered in NMA calculation)
+define SLVT sele .not. PRTN end
+set Nslvt ?nsel
+
+! Store total atom number
+set Natom ?natom
+
+! ============================= BEGIN OF NORMAL MODES COMBINATION BLOCK ========================== !
+!                                                                                                  !
+! This part creates a Q vector representing the combination of modes listed at the input-modes.txt !
+! file. The NMs are randomized and accumulated at the Q vector, that is then normalized.           !
+
+! create the structure list file for RMSD Filtering
+system "mkdir -p /tmp/struct-list; touch /tmp/struct-list/struct-list.txt"
+
+system "wc -l < ../inputs/input.txt > /tmp/lines.txt"
+open read card unit 14 name /tmp/lines.txt
+get modnu unit 14
+
+! Number of trials to find a good combination
+set reptot @rep
+set rep 0
+label start
+incr rep by 1
+set numtrials 1000000
+set icombi 0
+
+! Begin the loop for normal mode combination
+label combi
+incr icombi by 1
+
+! open the structure list file for RMSD Filtering
+open read card unit 61 name /tmp/struct-list/struct-list.txt
+
+! ====================================== !
+! COMBINE AND NORMALIZE PFF NORMAL MODES !
+! ====================================== !
+
+! create a file to store each replica alphas
+open write card unit 15 name /tmp/rep@rep-alphas.txt
+set nmloop 0
+
+! open the additional inputfile that includes the modes to excite
+open read card unit 46 name ../inputs/input.txt
+rewind unit 46
+
+scalar sca5 set 0 sele PRTN end
+scalar sca6 set 0 sele PRTN end
+scalar sca7 set 0 sele PRTN end
+
+label pffread
+incr nmloop by 1
+get nm unit 46
+
+open read card unit 17 name ../inputs/charmm-nm@nm.crd
+read coor card comp unit 17
+close unit 17
+
+! generate random seeds to excite the modes
+random system time
+calc randir = ?rand - 0.5
+set isign 1
+if @randir .lt. 0 set isign -1
+
+random system time
+calc randfac = ?rand * @isign
+
+scalar xcomp mult @randfac sele PRTN end
+scalar ycomp mult @randfac sele PRTN end
+scalar zcomp mult @randfac sele PRTN end
+
+! acumulate modes to
+! obtain a new Q vector
+! Q = (rand1 * q1) + (rand2 * q2)...
+scalar xcomp +sto 5 sele PRTN end
+scalar ycomp +sto 6 sele PRTN end
+scalar zcomp +sto 7 sele PRTN end
+
+write title unit 15
+* @randfac
+
+if @nmloop .lt. @modnu goto pffread
+
+scalar xcomp recall 5 sele PRTN end
+scalar ycomp recall 6 sele PRTN end
+scalar zcomp recall 7 sele PRTN end
+
+scalar xcomp set 0 sele .not. PRTN end
+scalar ycomp set 0 sele .not. PRTN end
+scalar zcomp set 0 sele .not. PRTN end
+
+! normalize the Q vector
+scalar sca1 copy xcomp sele PRTN end
+scalar sca2 copy ycomp sele PRTN end
+scalar sca3 copy zcomp sele PRTN end
+
+scalar sca1 pow2r sele PRTN end
+scalar sca2 pow2r sele PRTN end
+scalar sca3 pow2r sele PRTN end
+
+scalar sca1 sum sca2
+scalar sca1 sum sca3
+
+scalar sca1 stat sele PRTN end
+set qnorm ?stot
+calc qnorm = sqrt(@qnorm)
+
+! normalize the Q vector
+scalar xcomp divi @qnorm sele PRTN end
+scalar ycomp divi @qnorm sele PRTN end
+scalar zcomp divi @qnorm sele PRTN end
+
+! write the Q vector
+open write card unit 97 name /tmp/rep@rep-pff-vector.vec
+write coor comp card unit 97
+
+close unit 46
+
+! ============================= END OF NORMAL MODES COMBINATION BLOCK ========================= !
+
+
+label filtering
+! ================================== BEGIN OF RMSD FILTERING BLOCK ============================ !
+!                                                                                               !
+! This part is for accepting or rejecting the Q vector. An RMSD threshold value is used.		! 
+! The structure is displaced from 1 Å from the origin along the Q vector. If this displaced		!
+! structure has RMS Deviations with respect to the previous retained structures larger than the	!
+! threshold, this structure is retained and the Q vector accepted.								!
+! The following steps are used:																	!
+! 	- A temporary normal mode file containing the Q vector is first created.					!
+! 	- Thereafter the initial structure is displaced to a given RMSD along the Q vector.			!
+! 	- The RMS Deviations with respect to preceding displaced structures are calculated.			!
+! 	  If the rms deviations with respect to a preceding structure is lower than the threshold	!
+!	  value the combination of modes (defining the Q vector) is rejected. A new combination is	!
+!	  tested. If no value lower than the threshold is found thus the coordinates of the			!
+!	  displace structure is written into a file, the list of accepted structures is updated,	!
+!	  the combination of modes is accepted and the calculations are pursued.					!
+
+! Read the initial coordinates
+open read card unit 14 name ../inputs/@pdbfile
+read coor pdb unit 14
+close unit 14
+
+update inbf 0 imgfrq 0
+vibran nmod 1
+edit incl comp
+
+! This is a correction term based on the PROTEIN/SYSTEM atom number ratio
+! to achieve a displacement of 1 Å from the origin along the Q vector
+! rmscorrec = sqrt(Nprotein/Nsystem)
+calc rmsfac = sqrt( @Nprtn / @Natom )
+fill diff mode 1 rms @rmsfac
+end
+
+! Fit the displaced strucutre to the initial coordinates and calculate the RMSD
+coor orie rms comp sele PRTN end
+coor rms comp sele FILT end 
+
+! Get how many combinations have already been accepted
+system "wc -l /tmp/struct-list/struct-list.txt | cut -d" " -f1 > /tmp/lines_all.txt"
+open read card unit 81 name /tmp/lines_all.txt
+get nlines  unit 81
+close unit 81
+
+if @nlines .eq. 0 goto exfilter
+
+set ifilter 0
+label filter
+incr ifilter by 1
+
+get structpath unit 61
+
+! Read the previously accepted NM combinations
+open read card unit 63 name @structpath
+read coor card unit 63 sele PRTN end
+
+! Compare it with the current Q vector
+coor orie rms comp sele PRTN end
+coor rms comp sele FILT end 
+
+! Put a limit on the number of trials
+if ?rms .lt. @rmsthreshold then
+  close unit 61
+  if @icombi .lt. @numtrials then
+    goto combi
+  else
+    open write card unit 64 name /tmp/number-of-trials.txt
+    write title unit 64
+    * number of trials = @icombi
+    close unit 64
+    stop
+  endif
+endif
+
+if @ifilter .eq. @nlines goto exfilter
+
+goto filter
+
+label exfilter
+
+close unit 61
+
+! If Q vector is retained
+open write card unit 65 name /tmp/tempstruct.txt
+write title unit 65
+*/tmp/struct-list/struct-rep@rep.coor
+close unit 65
+
+system "cat /tmp/tempstruct.txt | tr '[A-Z]' '[a-z]' >> /tmp/struct-list/struct-list.txt"
+
+open write card unit 62 name /tmp/struct-list/struct-rep@rep.coor
+write coor comp card unit 62 sele PRTN end
+
+if @rep .lt. @reptot goto start
+
+! ================================= END OF RMSD FILTERING BLOCK ================================ !
+
+stop

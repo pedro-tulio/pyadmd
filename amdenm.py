@@ -56,10 +56,9 @@ def write_nm(nms_to_write):
     unzip(f"{input_dir}/charmm_toppar.zip", input_dir)
 
     nms = [str(t + '\n') for t in nms_to_write.split(',')]
-    nms.append("999")
     with open(f"{input_dir}/input.txt", 'w') as input_nm:
         input_nm.writelines(nms)
-    os.chdir(".modules")
+    os.chdir(f"{cwd}/.modules")
     cmd = (f"charmm -i wrt-nm.mdu psffile={psffile.split('/')[-1]}"
            f" modfile={modefile.split('/')[-1]} -o {input_dir}/wrt-nm.out")
     returned_value = subprocess.call(cmd, shell=True,
@@ -70,30 +69,20 @@ def write_nm(nms_to_write):
         sys.exit()
 
 
-def combine_modes(modes, alphas):
+def combine_modes():
     '''
-    Combine and normalize normal modes
-
-    :param
-        (list) modes: list of normal modes to combine
-    :param
-        (list) alphas: list of random coefficients to excite the modes
-    :return:
-        (matrix) vector: matrix containing the normalized vector of combined modes
+    Combine and normalize normal modes then apply the RMSD filtering
     '''
 
-    # Get the atom number and create a matrix with zeros
-    vector = np.zeros((sel_atom, 3))
-
-    # Combine the modes
-    for nm, alpha in zip(modes.split(','), alphas):
-        mode = mda.Universe(f"{input_dir}/charmm-nm{nm}.crd")
-        vector = vector + mode.atoms.select_atoms(selection).positions * alpha
-
-    # Normalize the Q vector
-    vector = vector / np.sqrt(np.sum(vector * vector))
-
-    return vector
+    os.chdir(f"{cwd}/.modules")
+    cmd = (f"charmm -i rms-filtering.mdu psffile={psffile.split('/')[-1]}"
+           f" pdbfile={pdbfile.split('/')[-1]} rmsthreshold={rmsfiltering} rep={replicas} -o {input_dir}/rms-filtering.out")
+    returned_value = subprocess.call(cmd, shell=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if returned_value != 0:
+        print(f"{pgmerr}An error occurred while combining the normal modes.\n"
+              f"{pgmerr}Inspect the file {err}inputs/rms-filtering.out{std} for detailed information.\n")
+        sys.exit()
 
 
 def excite(q_vector, user_ek):
@@ -238,6 +227,9 @@ opt_run.add_argument('-sel', '--selection',
 opt_run.add_argument('-rep', '--replicas',
                     action="store", type=int, default=10,
                     help="Number of aMDeNM replicas to run (default: 10).")
+opt_run.add_argument('-rms', '--rmsfiltering',
+                    action="store", type=float, default=1,
+                    help="Value of RMSD filtering (default: 1.0).")
 opt_run.set_defaults(run=True)
 
 # Create a dictionary containing the user-provided arguments
@@ -274,6 +266,7 @@ if 'energy' in args: energy = args['energy']
 if 'time' in args: time = args['time']
 if 'selection' in args: selection = args['selection']
 if 'replicas' in args: replicas = args['replicas']
+if 'rmsfiltering' in args: rmsfiltering = args['rmsfiltering']
 
 # Running options
 if 'run' in args:
@@ -320,6 +313,12 @@ if 'run' in args:
     # Extract NAMD topology and parameters files
     unzip(f"{input_dir}/namd_toppar.zip", input_dir)
 
+    # Combine the modes
+    print(f"{pgmnam}Generating {ext}{replicas}{std} combinations for modes {ext}{modes}{std}.")
+    print(f"{pgmnam}The RMS filtering threshold is {ext}{rmsfiltering}{std}.")
+    print(f"{pgmnam}This may take a while.")
+    combine_modes()
+
     #######################
     ### CALL FOR ACTION ###
     #######################
@@ -331,22 +330,18 @@ if 'run' in args:
         os.makedirs(rep_dir, exist_ok=True)
         os.chdir(rep_dir)
 
-        # Generate random seeds to excite the modes
-        alphas = np.random.uniform(-1, 1, len(modes.split(',')))
-        with open(f"alphas.txt", 'w') as file:
-            file.writelines(str(alphas.tolist()))
-
-        # Combine the modes
-        print(f"{pgmnam}Combining modes {ext}{modes}{std} with alphas {ext}{str(alphas.tolist())}{std}.")
-        q_vec = combine_modes(modes, alphas)
+        # Copying the NM combination vector and the alphas
+        shutil.copy(f"/tmp/rep{rep}-pff-vector.vec", "pff_vector.vec")
+        shutil.copy(f"/tmp/rep{rep}-alphas.txt", "alphas.txt")
 
         # Excite the combined vector according to user-defined energy increment
         print(f"{pgmnam}Writing the excitation vector with a Ek injection of {ext}{energy}{std} kcal/mol.")
+        q_vec = mda.Universe(f"{input_dir}/{psffile}", "pff_vector.vec", format="CRD")
+        q_vec = q_vec.atoms.select_atoms(selection).positions
         exc_vec = excite(q_vec, energy)
 
-        # Write the combined modes vector and the excited vector
-        wrt_vec(q_vec, "pff_vector.vec")
-        shutil.copy("pff_vector.vec", "cntrl_vector.vec")
+        # Write the combination and the excited vector
+        wrt_vec(q_vec, "cntrl_vector.vec")
         wrt_vec(exc_vec, "excitation.vel")
 
         # Start the excitation loop, copy initial files and define initial variables

@@ -7,12 +7,11 @@ This new approach, aMDeNM, automatically controls the energy injection and take 
 This document will give an overview of the Adaptive MDeNM method and help to properly setup and run a simulation.
 * ****
 
-
 #### Table of Contents
-<!-- TOC START min:1 max:3 link:true asterisk:false update:true -->
 - [Adaptive MDeNM User Guide](#adaptive-mdenm-user-guide)
       - [Table of Contents](#table-of-contents)
   - [Method Overview](#method-overview)
+    - [RMSD Filtering](#rmsd-filtering)
     - [Kinetic Energy Control](#kinetic-energy-control)
     - [Excitation Direction Update](#excitation-direction-update)
   - [aMDeNM Applications](#amdenm-applications)
@@ -25,12 +24,14 @@ This document will give an overview of the Adaptive MDeNM method and help to pro
   - [Analysis](#analysis)
   - [Citing](#citing)
   - [Contact](#contact)
-<!-- TOC END -->
 * ****
 
 ## Method Overview
 
 The Molecular Dynamics with excited Normal Modes (MDeNM) is a enhanced sampling molecular dynamics method that uses normal modes as collective variables in order do increase the conformational space explored during MD simulation. This is done by injecting an incremental energy to the system, thus assigning additional atomic velocities along the direction of a given NM (or a combination of a NM set). The combination of the velocities from MD and those provided by the NM vectors properly couple slow and fast motions, allowing one to obtain large time scale movements, such as domain transitions in a feasible simulation time.
+
+### RMSD Filtering
+An optmized MDeNM run is ensured by evaluating the excitation directions through a RMSD threshold (*t*) - that is user defined. During the run, a hypersphere with radius *1 Å* is set up around the reference position. Each point at its surface represents a different possible NM combination. When searching for a new NM combination, the structure is displaced along this direction untill it reaches the hypersphere's surface. Then, its RMSD value is tested against all previously accepted directions. If this value is equal or greater than *t*, this new vector is retained. Otherwise, a new combination must be computed. This step avoids redundant directions to be excited during the simulation, thus improving the computing time.
 
 ### Kinetic Energy Control
 
@@ -82,7 +83,7 @@ Adaptive MDeNM is distributed as a Python handler script that manage the NAMD si
 
 ### Configuration
 
-One can easily configure an Adaptive MDeNM run by using the configuration file provided in the *inputs* folder. In a terminal, enter the *inputs* folder and type <code>./configure -o</code>, the program will prompt the instructions and automatically edit the files. If something goes wrong during the process, cancel the editing and type <code>./configure -c</code> for clean up and start again. **Note:** make sure that the configuration file is being executed ***within the inputs*** folder.
+One can easily setup and run an Adaptive MDeNM simulation by using this script.
 The configuration process is straightforward. Some technical aspects will be covered in this section in order to facilitate the method comprehension.
 
 - **Energy injection:** the excitation time of Adaptive MdeNM is *0.2 ps*. This means that every *0.2 ps* the system receives the additional amount of energy chosen by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of *0.125 kcal/mol* is sufficient to achieve a large exploration of the conformational space.

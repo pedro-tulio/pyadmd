@@ -35,15 +35,18 @@ prnlev 5
 
 ! Read all modes, select the mode of interest
 ! and generate the displacement along it
+system "wc -l < ../inputs/input.txt > /tmp/lines.txt"
+open read card unit 14 name /tmp/lines.txt
+get modnu unit 14
+set nmloop 0
 
 label writemodes
+incr nmloop by 1
+get nm unit 13
 
-get modnu unit 13
-
-if @modnu .eq. 999 goto stopwritemodes 
 vibran nmod 406
 open read file unit 40 name ../inputs/@modfile
-read norm file mode @modnu unit 40
+read norm file mode @nm unit 40
 fill comp mode 1 fact 1
 end 
 
@@ -57,11 +60,10 @@ scalar xcomp prod wmain
 scalar ycomp prod wmain
 scalar zcomp prod wmain
 
-open write card unit 14 name ../inputs/charmm-nm@modnu.crd
+open write card unit 14 name ../inputs/charmm-nm@nm.crd
 write coor comp card unit 14
 
-goto writemodes
-label stopwritemodes
+if @nmloop .lt. @modnu goto writemodes
 
 close unit 13
 
