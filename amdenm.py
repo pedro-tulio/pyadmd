@@ -133,6 +133,16 @@ def wrt_vec(xyz, output_file):
     # Write the output file
     sys_zeros.write(f"{output_file}", file_format="NAMDBIN")
 
+def clean():
+    '''
+    Delete previous run files
+    '''
+    # Removing previous replicas folders
+    files = os.listdir(cwd)
+    for item in files:
+        if item.startswith("rep"):
+            shutil.rmtree(os.path.join(cwd, item), ignore_errors=True)
+
 
 # Get working directory path
 cwd = os.getcwd()
@@ -278,6 +288,9 @@ if 'replicas' in args: replicas = args['replicas']
 # Running options
 if 'run' in args:
     print(f"{pgmnam}{tle}Setup and run aMDeNM simulations{std}\n")
+
+    # Remove previous temporary and replica files
+    clean()
 
     # Test if the provided files exist
     file_list = [modepath, psfpath, pdbpath, coorpath, velpath, xscpath, strpath]
@@ -527,10 +540,27 @@ if 'run' in args:
                 new_vel = curr_vel + (exc_vec - v_proj)
                 wrt_vec(new_vel, f"step_{loop}.vel")
 
-    # Write the projections into files
-    for i,j in zip((vp, ek, qp, rmsp), ("vp", "ek", "coor", "rms")):
-        with open(f"{j}-proj.out", 'w') as write:
-            write.writelines(i)
+        # Write the projections into files
+        for i,j in zip((vp, ek, qp, rmsp), ("vp", "ek", "coor", "rms")):
+            with open(f"{j}-proj.out", 'w') as write:
+                write.writelines(i)
+        # De-excite the system
+        shutil.copy(f"{input_dir}/deexc.namd", 'deexc.namd')
+        deexc_conf = Path('deexc.namd')
+        deexc_conf.write_text(deexc_conf.read_text().replace('$PSF', f"{input_dir}/{psffile}"))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$PDB', f"{input_dir}/{pdbfile}"))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$STR', f"{input_dir}/{strfile}"))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$COOR', str(loop)))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$VEL', str(loop)))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$XSC', str(loop)))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$TS', str(time / 0.002)))
+
+        # Run NAMD
+        now = tm.strftime("%H:%M:%S")
+        print(f"{pgmnam}{now} {ext}Replica {rep}{std}: running the {ext}de-excitation step{std}...")
+        run_namd = f"namd3 deexc.namd > deexcitation.log"
+        returned_value = subprocess.call(run_namd, shell=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 elif 'clean' in args:
     print(f"{pgmnam}{tle}Clean previous pyAdMD setup files{std}\n")
@@ -543,9 +573,7 @@ elif 'clean' in args:
     for item in ("charmm_toppar", "namd_toppar"):
             shutil.rmtree(os.path.join(input_dir, item))
 
-    # Removing previous replicas folders
-    files = os.listdir(cwd)
-    for item in files:
-        if item.startswith("rep"):
-            shutil.rmtree(os.path.join(cwd, item))
+    # Remove previous temporary and replica files
+    clean()
+
     print(f"{pgmnam}Erasing is done.\n")

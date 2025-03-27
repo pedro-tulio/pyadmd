@@ -5,16 +5,14 @@ The MDeNM (Molecular Dynamics with excited Normal Modes) method consists of mult
 This new approach, aMDeNM, automatically controls the energy injection and take the natural constraints imposed by the structure and the environment into account during protein conformational sampling, which prevent structural distortions all along the simulation.Due to the stochasticity of thermal motions, NM eigenvectors move away from the original directions when used to displace the protein, since the structure evolves into other potential energy wells. Therefore, the displacement along the modes is valid for small distances, but the displacement along greater distances may deform the structure of the protein if no care is taken. The advantage of this methodology is to adaptively change the direction used to displace the system, taking into account the structural and energetic constraints imposed by the system itself and the medium, which allows the system to explore new pathways.
 
 This document will give an overview of the Adaptive MDeNM method and help to properly setup and run a simulation.
+
 * ****
 
-
-#### Table of Contents
-<!-- TOC START min:1 max:3 link:true asterisk:false update:true -->
 - [Adaptive MDeNM User Guide](#adaptive-mdenm-user-guide)
-      - [Table of Contents](#table-of-contents)
   - [Method Overview](#method-overview)
     - [Kinetic Energy Control](#kinetic-energy-control)
     - [Excitation Direction Update](#excitation-direction-update)
+    - [System De-Excitation](#system-de-excitation)
   - [aMDeNM Applications](#amdenm-applications)
     - [Physical force-field based normal modes](#physical-force-field-based-normal-modes)
   - [Preparing to run aMDeNM](#preparing-to-run-amdenm)
@@ -25,7 +23,7 @@ This document will give an overview of the Adaptive MDeNM method and help to pro
   - [Analysis](#analysis)
   - [Citing](#citing)
   - [Contact](#contact)
-<!-- TOC END -->
+
 * ****
 
 ## Method Overview
@@ -41,6 +39,10 @@ The additional kinetic energy injected in the system has a fast dissipation rate
 Since the excitation vector is obtained from the initial conformation, it is dependent of this configuration. As the system is displaced along this direction and change its conformation, the motion loses its directionality due to mainly anharmonic effects. To prevent the structural distortions produced by the displacement along a vector that is no longer valid, the program update the excitation directions based on the trajectory evolution during the previous excitation steps. This procedure allows the system to adaptively find a relaxed path to follow during the next MDeNM excitations.
 
 The update depends on two variables: a distance (*r<sub>d</sub>*) by which the system has been displaced along the excitation vector; and a given angle (*α*) by which the real displacement has deviated from the ideal motion described by the excitation vector. Everytime the system reaches a displacement equals to *r<sub>d</sub>* along the excitation direction, the *α* angle is computed. If the deviation is lesser than a threshold value, the current direction is retained and the simulation resumes. Otherwise, a new vector is generated considering the motion presented by the system in the last excitation steps. The default values for *r<sub>d</sub>* and *α* are *0.5 Å* and *60°*, respectively.
+
+### System De-Excitation
+
+At the end of each replica, a de-excitation molecular dynamics is submited in order to recover the equilibrated thermodynamics of the system. This final step aims to remove any residual MDeNM additional energy from the system and provide further sctructural and dynamical exploration.
 
 [Back to top ↩](#)
 * ****
