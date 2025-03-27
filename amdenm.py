@@ -122,6 +122,16 @@ def wrt_vec(xyz, output_file):
     # Write the output file
     sys_zeros.write(f"{output_file}", file_format="NAMDBIN")
 
+def clean():
+    '''
+    Delete previous run files
+    '''
+    # Removing previous replicas folders
+    files = os.listdir(cwd)
+    for item in files:
+        if item.startswith("rep"):
+            shutil.rmtree(os.path.join(cwd, item), ignore_errors=True)
+
 
 # Get working directory path
 cwd = os.getcwd()
@@ -272,6 +282,9 @@ if 'rmsfiltering' in args: rmsfiltering = args['rmsfiltering']
 if 'run' in args:
     print(f"{pgmnam}{tle}Setup and run aMDeNM simulations{std}\n")
 
+    # Remove previous temporary and replica files
+    clean()
+
     # Test if the provided files exist
     file_list = [modepath, psfpath, pdbpath, coorpath, velpath, xscpath, strpath]
     for file in file_list:
@@ -314,8 +327,8 @@ if 'run' in args:
     unzip(f"{input_dir}/namd_toppar.zip", input_dir)
 
     # Combine the modes
-    print(f"{pgmnam}Generating {ext}{replicas}{std} combinations for modes {ext}{modes}{std}.")
     print(f"{pgmnam}The RMS filtering threshold is {ext}{rmsfiltering}{std}.")
+    print(f"{pgmnam}Generating {ext}{replicas}{std} combinations for modes {ext}{modes}{std}.")
     print(f"{pgmnam}This may take a while.")
     combine_modes()
 
@@ -331,8 +344,8 @@ if 'run' in args:
         os.chdir(rep_dir)
 
         # Copying the NM combination vector and the alphas
-        shutil.copy(f"/tmp/rep{rep}-pff-vector.vec", "pff_vector.vec")
-        shutil.copy(f"/tmp/rep{rep}-alphas.txt", "alphas.txt")
+        shutil.copy(f"{cwd}/rep-struct-list/rep{rep}-pff-vector.vec", "pff_vector.vec")
+        shutil.copy(f"{cwd}/rep-struct-list/rep{rep}-alphas.txt", "alphas.txt")
 
         # Excite the combined vector according to user-defined energy increment
         print(f"{pgmnam}Writing the excitation vector with a Ek injection of {ext}{energy}{std} kcal/mol.")
@@ -522,10 +535,32 @@ if 'run' in args:
                 new_vel = curr_vel + (exc_vec - v_proj)
                 wrt_vec(new_vel, f"step_{loop}.vel")
 
-    # Write the projections into files
-    for i,j in zip((vp, ek, qp, rmsp), ("vp", "ek", "coor", "rms")):
-        with open(f"{j}-proj.out", 'w') as write:
-            write.writelines(i)
+        # Write the projections into files
+        for i,j in zip((vp, ek, qp, rmsp), ("vp", "ek", "coor", "rms")):
+            with open(f"{j}-proj.out", 'w') as write:
+                write.writelines(i)
+
+        # De-excite the system
+        shutil.copy(f"{input_dir}/deexc.namd", 'deexc.namd')
+        deexc_conf = Path('deexc.namd')
+        deexc_conf.write_text(deexc_conf.read_text().replace('$PSF', f"{input_dir}/{psffile}"))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$PDB', f"{input_dir}/{pdbfile}"))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$STR', f"{input_dir}/{strfile}"))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$COOR', str(loop)))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$VEL', str(loop)))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$XSC', str(loop)))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$TS', str(time / 0.002)))
+
+        # Run NAMD
+        now = tm.strftime("%H:%M:%S")
+        print(f"{pgmnam}{now} {ext}Replica {rep}{std}: running the {ext}de-excitation step{std}...")
+        run_namd = f"namd3 deexc.namd > deexcitation.log"
+        returned_value = subprocess.call(run_namd, shell=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if returned_value != 0:
+            print(f"{pgmerr}An error occurred while running NAMD.\n"
+                  f"{pgmerr}Inspect the file {err}deexcitation.log{std} for detailed information.\n")
+            sys.exit()
 
 elif 'clean' in args:
     print(f"{pgmnam}{tle}Clean previous pyAdMD setup files{std}\n")
@@ -536,11 +571,9 @@ elif 'clean' in args:
         if item.endswith((".txt", ".out", ".crd", ".psf", ".pdb", ".coor", ".vel", ".xsc", ".str", ".mod")):
             os.remove(os.path.join(input_dir, item))
     for item in ("charmm_toppar", "namd_toppar"):
-            shutil.rmtree(os.path.join(input_dir, item))
+            shutil.rmtree(os.path.join(input_dir, item), ignore_errors=True)
 
-    # Removing previous replicas folders
-    files = os.listdir(cwd)
-    for item in files:
-        if item.startswith("rep"):
-            shutil.rmtree(os.path.join(cwd, item))
+    # Remove previous temporary and replica files
+    clean()
+
     print(f"{pgmnam}Erasing is done.\n")

@@ -6,13 +6,6 @@ DIMENS CHSIZE 3000000 MAXRES 3000000
 bomlev -5
 wrnlev -1
 
-! ============================ !
-! READ USER-DEFINED PARAMETERS !
-! ============================ !
-
-! RMSD value for filtering (Å)
-!set rmsthreshold 1
-
 ! ==================================== !
 ! SETUP THE SYSTEM TO MDENM SIMULATION !
 ! ==================================== !
@@ -33,7 +26,7 @@ close unit 25
 define PRTN sele segid PRO* end
 set Nprtn ?nsel
 ! Define the region of interest to apply the filtering
-define FILT sele segid PRO* .and. type CA end
+define FILT sele PRTN .and. type CA end
 set Nfilt ?nsel
 ! Define the group formed by the membrane, solvent and ions (not considered in NMA calculation)
 define SLVT sele .not. PRTN end
@@ -48,7 +41,7 @@ set Natom ?natom
 ! file. The NMs are randomized and accumulated at the Q vector, that is then normalized.           !
 
 ! create the structure list file for RMSD Filtering
-system "mkdir -p /tmp/struct-list; touch /tmp/struct-list/struct-list.txt"
+system "mkdir -p ../rep-struct-list; touch ../rep-struct-list/struct-list.txt"
 
 system "wc -l < ../inputs/input.txt > /tmp/lines.txt"
 open read card unit 14 name /tmp/lines.txt
@@ -67,14 +60,14 @@ label combi
 incr icombi by 1
 
 ! open the structure list file for RMSD Filtering
-open read card unit 61 name /tmp/struct-list/struct-list.txt
+open read card unit 61 name ../rep-struct-list/struct-list.txt
 
 ! ====================================== !
 ! COMBINE AND NORMALIZE PFF NORMAL MODES !
 ! ====================================== !
 
 ! create a file to store each replica alphas
-open write card unit 15 name /tmp/rep@rep-alphas.txt
+open write card unit 15 name ../rep-struct-list/rep@rep-alphas.txt
 set nmloop 0
 
 ! open the additional inputfile that includes the modes to excite
@@ -148,7 +141,7 @@ scalar ycomp divi @qnorm sele PRTN end
 scalar zcomp divi @qnorm sele PRTN end
 
 ! write the Q vector
-open write card unit 97 name /tmp/rep@rep-pff-vector.vec
+open write card unit 97 name ../rep-struct-list/rep@rep-pff-vector.vec
 write coor comp card unit 97
 
 close unit 46
@@ -194,7 +187,7 @@ coor orie rms comp sele PRTN end
 coor rms comp sele FILT end 
 
 ! Get how many combinations have already been accepted
-system "wc -l /tmp/struct-list/struct-list.txt | cut -d" " -f1 > /tmp/lines_all.txt"
+system "wc -l ../rep-struct-list/struct-list.txt | cut -d" " -f1 > /tmp/lines_all.txt"
 open read card unit 81 name /tmp/lines_all.txt
 get nlines  unit 81
 close unit 81
@@ -240,12 +233,12 @@ close unit 61
 ! If Q vector is retained
 open write card unit 65 name /tmp/tempstruct.txt
 write title unit 65
-*/tmp/struct-list/struct-rep@rep.coor
+*../rep-struct-list/struct-rep@rep.coor
 close unit 65
 
-system "cat /tmp/tempstruct.txt | tr '[A-Z]' '[a-z]' >> /tmp/struct-list/struct-list.txt"
+system "cat /tmp/tempstruct.txt | tr '[A-Z]' '[a-z]' >> ../rep-struct-list/struct-list.txt"
 
-open write card unit 62 name /tmp/struct-list/struct-rep@rep.coor
+open write card unit 62 name ../rep-struct-list/struct-rep@rep.coor
 write coor comp card unit 62 sele PRTN end
 
 if @rep .lt. @reptot goto start
