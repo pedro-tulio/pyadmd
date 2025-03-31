@@ -93,12 +93,12 @@ switchdist              10.0;               # cutoff - 2.
                                             # correspondence in charmm:
                                             # (cutnb,ctofnb,ctonnb = pairlistdist,cutoff,switchdist)
 pairlistdist            16.0;               # stores the all the pairs with in the distance it should be larger
-                                            # than cutoff( + 2.) 
+                                            # than cutoff( + 2.)
 stepspercycle           20;                 # 20 redo pairlists every ten steps
-pairlistsPerCycle       2;                  # 2 is the default 
+pairlistsPerCycle       2;                  # 2 is the default
                                             # cycle represents the number of steps between atom reassignments
                                             # this means every 20/2=10 steps the pairlist will be updated
-                          
+
 # Integrator Parameters
 timestep                2.0;                # fs/step
 rigidBonds              all;                # Bound constraint all bonds involving H are fixed in length
@@ -107,7 +107,7 @@ fullElectFrequency      1;                  # PME every step
 
 wrapWater               on;                 # wrap water to central cell
 wrapAll                 on;                 # wrap other molecules too
-if { $boxtype in {"rhdo" "octahedral" "hexagonal"} } {
+if { $xtltype in {"rhdo" "octahedral" "hexagonal"} } {
 wrapNearest             on;                 # use for non-rectangular cells (wrap to the nearest image)
 } else {
 wrapNearest             off;                # use for rectangular cells (do not wrap to the nearest image)
@@ -125,8 +125,8 @@ useFlexibleCell         yes;                # yes for anisotropic system like me
 useConstantRatio        yes;                # keeps the ratio of the unit cell in the x-y plane constant A=B
 
 langevinPiston          on;                 # Nose-Hoover Langevin piston pressure control
-langevinPistonTarget    1.01325;            # target pressure in bar 1atm = 1.01325bar 
-langevinPistonPeriod    50.0;               # oscillation period in fs. correspond to pgamma T=50fs=0.05ps 
+langevinPistonTarget    1.01325;            # target pressure in bar 1atm = 1.01325bar
+langevinPistonPeriod    50.0;               # oscillation period in fs. correspond to pgamma T=50fs=0.05ps
                                             # f=1/T=20.0(pgamma)
 langevinPistonDecay     25.0;               # oscillation decay time. smaller value correspons to larger random
                                             # forces and increased coupling to the Langevin temp bath.
