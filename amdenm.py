@@ -545,20 +545,20 @@ if 'run' in args:
             with open(f"{j}-proj.out", 'w') as write:
                 write.writelines(i)
         # De-excite the system
-        shutil.copy(f"{input_dir}/deexc.namd", 'deexc.namd')
-        deexc_conf = Path('deexc.namd')
+        shutil.copy(f"{input_dir}/deexcitation.namd", 'deexcitation.namd')
+        deexc_conf = Path('deexcitation.namd')
         deexc_conf.write_text(deexc_conf.read_text().replace('$PSF', f"{input_dir}/{psffile}"))
         deexc_conf.write_text(deexc_conf.read_text().replace('$PDB', f"{input_dir}/{pdbfile}"))
         deexc_conf.write_text(deexc_conf.read_text().replace('$STR', f"{input_dir}/{strfile}"))
         deexc_conf.write_text(deexc_conf.read_text().replace('$COOR', str(loop)))
         deexc_conf.write_text(deexc_conf.read_text().replace('$VEL', str(loop)))
         deexc_conf.write_text(deexc_conf.read_text().replace('$XSC', str(loop)))
-        deexc_conf.write_text(deexc_conf.read_text().replace('$TS', str(time / 0.002)))
+        deexc_conf.write_text(deexc_conf.read_text().replace('$TS', str(int(time / 0.002))))
 
         # Run NAMD
         now = tm.strftime("%H:%M:%S")
         print(f"{pgmnam}{now} {ext}Replica {rep}{std}: running the {ext}de-excitation step{std}...")
-        run_namd = f"namd3 deexc.namd > deexcitation.log"
+        run_namd = f"namd3 deexcitation.namd > deexcitation.log"
         returned_value = subprocess.call(run_namd, shell=True,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
