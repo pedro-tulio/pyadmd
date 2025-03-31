@@ -107,7 +107,7 @@ fullElectFrequency      1;                  # PME every step
 
 wrapWater               on;                 # wrap water to central cell
 wrapAll                 on;                 # wrap other molecules too
-if { $boxtype in {"rhdo" "octahedral" "hexagonal"} } {
+if { $xtltype in {"rhdo" "octahedral" "hexagonal"} } {
 wrapNearest             on;                 # use for non-rectangular cells (wrap to the nearest image)
 } else {
 wrapNearest             off;                # use for rectangular cells (do not wrap to the nearest image)
