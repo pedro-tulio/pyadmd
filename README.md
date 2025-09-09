@@ -96,13 +96,13 @@ The implementation uses an inverse power law potential scaled with dimensionalit
 The generated points are then used as scalar factors that multiply each normal mode vector used in the linear combination that makes up the excitation direction vector $\textbf{Q}$.
 
 ### Kinetic Energy Control
-The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $\textbf{Q}$ direction is calculated by projecting first the current velocities to the excitation direction $\textbf{Q}$ as $\textbf{V}_p = (\textbf{V}_{curr}\textbf{Q})\textbf{Q}$, where $\textbf{V}_p$ and $\textbf{V}_{curr}$ the 3N-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
+The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $\textbf{Q}$ direction is calculated by projecting first the current velocities to the excitation direction $\textbf{Q}$ as $\textbf V_p = (\textbf V_{curr} \textbf{Q}) \textbf{Q}$, where $\textbf V_{p}$ and $\textbf{V}_{curr}$ the 3N-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
 
 $$
 E_k = \frac{1}{2} \textbf{V}_{p}^T \textbf{M} \textbf{V}_p
 $$
 
-where $\textbf{M}$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $\textbf{V}_{new} = \textbf{V}_{curr} + (\textbf{V}_{exc} - \textbf{V}_{p})$.
+where $\textbf{M}$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $\textbf V_{new} = \textbf V_{curr} + (\textbf V_{exc} - \textbf V_{p})$.
 
 With this procedure, the system is kept in a continuous excited state, allowing an effective small, "adiabatic-like" energy injection. The energy injection control is done by projecting the velocities computed during the simulation onto the excited vector, thus obtaining and rescaling the kinetic energy corresponding to it.
 
