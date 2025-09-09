@@ -211,19 +211,19 @@ The configuration process is straightforward. Some technical aspects will be cov
 ### Using CHARMM normal modes
 
 ```
-python pyAdMD.py run -type CHARMM -mod modes.mod -psf setup.psf -pdb system.pdb -coor system.coor -vel system.vel -xsc system.xsc -str system.str
+python pyAdMD.py run -type CHARMM -mod tutorial/modes.mod -psf tutorial/setup.psf -pdb tutorial/system.pdb -coor tutorial/system.coor -vel tutorial/system.vel -xsc tutorial/system.xsc -str tutorial/system.str
 ```
 
 ### Using Cα-only ENM with custom parameters
 
 ```
-python pyAdMD.py run -type CA -psf setup.psf -pdb system.pdb -coor system.coor -vel system.vel -xsc system.xsc -str system.str -nm 7,15,20 -ek 0.5 -t 100 -sel "protein and resid 115 to 458" -rep 60
+python pyAdMD.py run -type CA -psf tutorial/setup.psf -pdb tutorial/system.pdb -coor system.coor -vel tutorial/system.vel -xsc tutorial/system.xsc -str tutorial/system.str -nm 7,15,20 -ek 0.5 -t 100 -sel "protein and resid 1 to 60" -rep 60
 ```
 
 ### Using heavy atoms without direction correction (standard MDeNM)
 
 ```
-python pyAdMD.py run -type HEAVY -mod modes.mod -psf setup.psf -pdb system.pdb -coor system.coor -vel system.vel -xsc system.xsc -str system.str --no_correc
+python pyAdMD.py run -type HEAVY -psf tutorial/setup.psf -pdb system.pdb -coor tutorial/system.coor -vel tutorial/system.vel -xsc tutorial/system.xsc -str tutorial/system.str --no_correc
 ```
 
 ### Restart unfinished pyAdMD simulations
