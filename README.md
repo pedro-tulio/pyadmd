@@ -1,14 +1,29 @@
 # Adaptive Molecular Dynamics with Python
+
+                                    █████████       █████ ██████   ██████ ██████████
+                                   ███░░░░░███     ░░███ ░░██████ ██████ ░░███░░░░███
+             ████████  █████ ████ ░███    ░███   ███████  ░███░█████░███  ░███   ░░███
+            ░░███░░███░░███ ░███  ░███████████  ███░░███  ░███░░███ ░███  ░███    ░███
+             ░███ ░███ ░███ ░███  ░███░░░░░███ ░███ ░███  ░███ ░░░  ░███  ░███    ░███
+             ░███ ░███ ░███ ░███  ░███    ░███ ░███ ░███  ░███      ░███  ░███    ███
+             ░███████  ░░███████  █████   █████░░████████ █████     █████ ██████████
+             ░███░░░    ░░░░░███ ░░░░░   ░░░░░  ░░░░░░░░ ░░░░░     ░░░░░ ░░░░░░░░░░
+             ░███       ███ ░███
+             █████     ░░██████
+            ░░░░░       ░░░░░░
+
 The MDeNM (Molecular Dynamics with excited Normal Modes) method consists of multiple-replica short MD simulations in which motions described by a given subset of low-frequency NMs are kinetically excited. This is achieved by adding additional atomic velocities along several randomly determined linear combinations of NM vectors, thus allowing an efficient coupling between slow and fast motions.
 
-This new approach, aMDeNM, automatically controls the energy injection and take the natural constraints imposed by the structure and the environment into account during protein conformational sampling, which prevent structural distortions all along the simulation.Due to the stochasticity of thermal motions, NM eigenvectors move away from the original directions when used to displace the protein, since the structure evolves into other potential energy wells. Therefore, the displacement along the modes is valid for small distances, but the displacement along greater distances may deform the structure of the protein if no care is taken. The advantage of this methodology is to adaptively change the direction used to displace the system, taking into account the structural and energetic constraints imposed by the system itself and the medium, which allows the system to explore new pathways.
+This new approach, Adaptive Molecular Dynamics with excited Normal Modes (aMDeNM), automatically controls the energy injection and take the natural constraints imposed by the structure and the environment into account during protein conformational sampling, which prevent structural distortions all along the simulation.Due to the stochasticity of thermal motions, NM eigenvectors move away from the original directions when used to displace the protein, since the structure evolves into other potential energy wells. Therefore, the displacement along the modes is valid for small distances, but the displacement along greater distances may deform the structure of the protein if no care is taken. The advantage of this methodology is to adaptively change the direction used to displace the system, taking into account the structural and energetic constraints imposed by the system itself and the medium, which allows the system to explore new pathways.
 
-This document will give an overview of the Adaptive MDeNM method and help to properly setup and run a simulation.
+This document will give an overview of the aMDeNM method and help to properly setup and run a simulation.
 
 * ****
 
 - [Adaptive Molecular Dynamics with Python](#adaptive-molecular-dynamics-with-python)
   - [Method Overview](#method-overview)
+    - [NAMD Equilibration Molecular Dynamics](#namd-equilibration-molecular-dynamics)
+    - [CHARMM Normal Modes Analysis (Optional)](#charmm-normal-modes-analysis-optional)
     - [ENM Computation](#enm-computation)
     - [Uniform Normal Modes Combination](#uniform-normal-modes-combination)
       - [Problem Definition](#problem-definition)
@@ -21,15 +36,21 @@ This document will give an overview of the Adaptive MDeNM method and help to pro
   - [pyAdMD Applications](#pyadmd-applications)
     - [ENM](#enm)
     - [Physical force-field based normal modes](#physical-force-field-based-normal-modes)
-  - [Preparing to run pyAdMD](#preparing-to-run-pyadmd)
-    - [NAMD input files (Required)](#namd-input-files-required)
-    - [CHARMM input files (Optional)](#charmm-input-files-optional)
     - [pyAdMD files](#pyadmd-files)
     - [Configuration](#configuration)
+  - [Input Requirements](#input-requirements)
+    - [Run](#run)
+      - [Parameters:](#parameters)
+      - [Files:](#files)
+      - [Feature Flags](#feature-flags)
+    - [Append](#append)
+      - [Parameters:](#parameters-1)
   - [Usage Examples](#usage-examples)
     - [Using CHARMM normal modes](#using-charmm-normal-modes)
     - [Using Cα-only ENM with custom parameters](#using-cα-only-enm-with-custom-parameters)
     - [Using heavy atoms without direction correction (standard MDeNM)](#using-heavy-atoms-without-direction-correction-standard-mdenm)
+    - [Restart unfinished pyAdMD simulations](#restart-unfinished-pyadmd-simulations)
+    - [Append 100 ps to previously finished pyAdMD simulations](#append-100-ps-to-previously-finished-pyadmd-simulations)
     - [Clean previous setup files](#clean-previous-setup-files)
   - [Analysis](#analysis)
   - [Citing](#citing)
@@ -39,19 +60,28 @@ This document will give an overview of the Adaptive MDeNM method and help to pro
 * ****
 
 ## Method Overview
-The Adaptive Molecular Dynamics with excited Normal Modes (aMDeNM) is a enhanced sampling molecular dynamics method that uses normal modes as collective variables in order do increase the conformational space explored during MD simulation. This is done by injecting an incremental energy to the system, thus assigning additional atomic velocities along the direction of a given NM (or a combination of a NM set). The combination of the velocities from MD and those provided by the NM vectors properly couple slow and fast motions, allowing one to obtain large time scale movements, such as domain transitions in a feasible simulation time. The additional energy  injection and the excitation direction are constantly evaluated and updated to ensure the sampling validity.
+The aMDeNM is a enhanced sampling molecular dynamics method that uses normal modes as collective variables in order do increase the conformational space explored during MD simulation. This is done by injecting an incremental energy to the system, thus assigning additional atomic velocities along the direction of a given NM (or a combination of a NM set). The combination of the velocities from MD and those provided by the NM vectors properly couple slow and fast motions, allowing one to obtain large time scale movements, such as domain transitions in a feasible simulation time. The additional energy  injection and the excitation direction are constantly evaluated and updated to ensure the sampling validity.
+
+The aMDeNM simulations are done using *[NAMD 3.0](http://www.ks.uiuc.edu/Research/namd/)* and CHARMM36m forcefield. We implemented the code so the molecular dynamics are computed exclusively on GPU. We strongly recommend that all system preparation be done with *[CHARMM-GUI](http://charmm-gui.org)*.
+
+### NAMD Equilibration Molecular Dynamics
+This is a prerequired step to perform aMDeNM simulations. It consists in performing a short equilibration MD to store the final atomic velocities and positions.
+
+### CHARMM Normal Modes Analysis (Optional)
+If using CHARMM-based normal modes, it is also necessary to compute the modes from the last MD coordinates and store the vectors from the low-frequency end of the vibrational spectrum on a binary file.
 
 ### ENM Computation
-The program computes Cα or heavy atoms Elastic Network Model using the same algorithms as the software available at our [ENM github repository](https://github.com/pedro-tulio/enm).
+The program computes Cα or heavy atoms Elastic Network Model using the same algorithms as the software available at our *[ENM github repository](https://github.com/pedro-tulio/enm)*.
 
 ### Uniform Normal Modes Combination
-The program generates uniformly distributed points on N-dimensional hypersphere through a repulsion-based algorithm which employs a physics-inspired approach where points behave as charged particles confined to the spherical manifold, interacting through a dimensionally-scaled potential function. The generated points are then used as scaling factors to be used in normal modes combinations. The [PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM) was built to the same purpose. Here we present a different design with a faster and more simplified implementation.
+The program generates uniformly distributed points on N-dimensional hypersphere through a repulsion-based algorithm which employs a physics-inspired approach where points behave as charged particles confined to the spherical manifold, interacting through a dimensionally-scaled potential function. The generated points are then used as scaling factors to be used in normal modes combinations. The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* was built to the same purpose. Here we present a different design with a faster and more simplified implementation.
 
 #### Problem Definition
 Given an N-dimensional hypersphere $S^{N-1} = \{x \in R^{N}:||x|| = 1\}$ and an integer $P \gt 0$, we seek to generate $P$ points ${x_1 , x_2, \dots, x_P}$ on $S^{N-1}$ that maximize the minimal pairwise distance: $min_{dist} ||xi-xj||$ for $i \neq j$. This corresponds to finding an optimal spherical code with minimal angular separation.
 
 #### Energy Minimization Framework
 The algorithm reformulates the geometric optimization as an energy minimization problem with a repulsive potential function $U(r)$ between points:
+
 $$
 E = \sum_{i=1}^{P}  \sum_{j=1}^{P} U(||x_i-x_j||) ~~~ \text{for} ~~~ i \neq j
 $$
@@ -63,15 +93,41 @@ The implementation uses an inverse power law potential scaled with dimensionalit
 3. **Computational Stability:** The exponent ensures numerical stability by preventing excessively large or small force values in high dimensions
 
 #### Normal Modes Linear Combination 
-The generated points are then used as scalar factors that multiply each normal mode vector in the linear combination.
+The generated points are then used as scalar factors that multiply each normal mode vector used in the linear combination that makes up the excitation direction vector $\textbf{Q}$.
 
 ### Kinetic Energy Control
-The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. With this procedure, the system is kept in a continuous excited state, allowing an effective small, "adiabatic-like" energy injection. The energy injection control is done by projecting the velocities computed during the simulation onto the excited vector, thus obtaining and rescaling the kinetic energy corresponding to it.
+The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $\textbf{Q}$ direction is calculated by projecting first the current velocities to the excitation direction $\textbf{Q}$ as $\textbf{V}_p = (\textbf{V}_{curr}\textbf{Q})\textbf{Q}$, where $\textbf{V}_p$ and $\textbf{V}_{curr}$ the 3N-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
+
+$$
+E_k = \frac{1}{2} \textbf{V}_{p}^T \textbf{M} \textbf{V}_p
+$$
+
+where $\textbf{M}$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $\textbf{V}_{new} = \textbf{V}_{curr} + (\textbf{V}_{exc} - \textbf{V}_{p})$.
+
+With this procedure, the system is kept in a continuous excited state, allowing an effective small, "adiabatic-like" energy injection. The energy injection control is done by projecting the velocities computed during the simulation onto the excited vector, thus obtaining and rescaling the kinetic energy corresponding to it.
 
 ### Excitation Direction Update
-Since the excitation vector is obtained from the initial conformation, it is dependent of this configuration. As the system is displaced along this direction and change its conformation, the motion loses its directionality due to mainly anharmonic effects. To prevent the structural distortions produced by the displacement along a vector that is no longer valid, the program update the excitation directions based on the trajectory evolution during the previous excitation steps. This procedure allows the system to adaptively find a relaxed path to follow during the next MDeNM excitations.
+Since the excitation vector is obtained from the initial conformation, it is dependent of this configuration. As the system is displaced along this direction and change its conformation, the motion loses its directionality due to mainly anharmonic effects. To prevent the structural distortions produced by the displacement along a vector that is no longer valid, the program update the excitation directions based on the trajectory evolution during the previous excitation steps. This procedure allows the system to adaptively find a relaxed path to follow during the next aMDeNM excitations.
 
-The update depends on two variables: a distance ($r_d$) by which the system has been displaced along the excitation vector; and a given angle ($\alpha$) by which the real displacement has deviated from the ideal motion described by the excitation vector. Everytime the system reaches a displacement equals to $r_d$ along the excitation direction, the $\alpha$ angle is computed. If the deviation is lesser than a threshold value, the current direction is retained and the simulation resumes. Otherwise, a new vector is generated considering the motion presented by the system in the last excitation steps. The default values for $r_d$ and $\alpha$ are *0.5 Å* and *60°*, respectively.
+If we consider the *n<sup>th</sup>* simulation, the next excitation vector, $\textbf Q_{n+1}$, is determined based on specific parameter values obtained along the trajectory followed in the $\textbf Q_n$ direction. A new excitation vector is defined based on two parameters: the first relates to the effective displacement $\ell$ along $\textbf Q_n$ during the *n<sup>th</sup>* excited dynamics by projecting the mass-weighted effective displacement vector $\textbf d_n = \textbf M^{1/2} ({\langle \textbf r \rangle}_n - \textbf r_n^0)$ onto the normalized mass-weighted excitation vector $\textbf Q_n$, where the ${\langle \textbf r \rangle}_n$ is the average position of the structures over the last 0.1 ps obtained in the *n<sup>th</sup>* excitation, and $\textbf r_n^0$ is the starting position for the following simulation.
+
+The second parameter relates to the relative deviation of the vector $\textbf d_n$ with respect to vector $\textbf Q_n$, evaluated by the angle $\alpha_n$ between them. More precisely, we consider the $\cos {\alpha}_n$ obtained by taking the scalar product of these vectors after normalizing $\textbf d_n$, as following:
+
+$$
+\cos {\alpha}_n = \frac {\textbf d_n \textbf Q_n}{||\textbf d_n||}
+$$
+
+A precise rule is followed to decide whether to modify the excitation vector direction after every short simulation run. The excitation vector is changed as soon as $\ell_n$, the displacement along $\textbf Q_n$, is larger than a threshold value $\ell_c$, and when $\cos {\alpha}$ is lower than a threshold value ${\cos \alpha}_c$. The conditions for choosing the excitation vector between $\textbf d_n$ and $\textbf Q_n$ for the next simulation are defined by:
+
+$$
+\textbf Q_{n+1} = \begin{cases}
+  \textbf Q_n, & \text{if } \ell \leq \ell_c \\
+  \textbf Q_n, & \text{if } \ell \gt \ell_c \wedge \cos \alpha \ge  {\cos \alpha}_c \\
+  \textbf d_n, & \text{if } \ell \gt \ell_c \wedge \cos\alpha \lt {\cos\alpha}_c
+\end{cases}
+$$
+
+The default values for $\ell_c$ and $\alpha$ are *0.5 m<sup>1/2</sup>Å* (*m* being atomic mass unit) and *60°*, respectively.
 
 ### System De-Excitation
 At the end of each replica, a de-excitation molecular dynamics is submited in order to recover the equilibrated thermodynamics of the system. This final step aims to remove any residual MDeNM additional energy from the system and provide further sctructural and dynamical exploration.
@@ -88,24 +144,6 @@ Uses simpified force-field based on particles and springs computed automatically
 ### Physical force-field based normal modes
 Uses physical force-field based normal modes computed in *[CHARMM](https://www.charmm.org/charmm/)*. A given normal mode (or a linear combination of several modes) is used to excite the system during the molecular dyamics simulation.
 
-[Back to top ↩](#)
-* ****
-
-## Preparing to run pyAdMD
-The Adaptive MDeNM simulations are done using *[NAMD 3.0](http://www.ks.uiuc.edu/Research/namd/)* and CHARMM36m forcefield. We implemented the code so the molecular dynamics are computed exclusively on GPU. A short equilibration molecular dynamics (NAMD) (and the normal modes analysis, if done by CHARMM) must be computed beforehand as prerequisited steps to aMDeNM calculations. We strongly recommend that all system preparation be done with *[CHARMM-GUI](http://charmm-gui.org)*.
-
-### NAMD input files (Required)
-This is a prerequired step to perform aMDeNM simulations. It consists in performing a short equilibration MD to store the final atomic velocities and positions. At the end of this step, the following files must be provided to the following procedure:
-- topology file (.psf);
-- structure file (.pdb);
-- periodic cell parameters (.xsc);
-- final coordinates (.coor);
-- final velocities (.vel).
-- box and PBC additional parameters (.str);
-
-### CHARMM input files (Optional)
-If using CHARMM-based normal modes, it is necessary to compute the modes from the last MD coordinates and store the vectors from the low-frequency end of the vibrational spectrum on a binary file. Thus, pyAdMD will require the following CHARMM files to properly run:
-- normal modes vectors (.mod).
 
 ### pyAdMD files
 pyAdMD is distributed as a Python handler script that compute ENM modes, uniformly distributes linear combinations of modes in the N-dimensional hypersphere space, manage NAMD simulations and compute the projections along the excitation direction and apply the correction whenever necessary. An additional <code>tools</code> folder includes scripts not used by NAMD, such as the one to write down the CHARMM normal modes.
@@ -118,7 +156,52 @@ The configuration process is straightforward. Some technical aspects will be cov
 - **Simulation time:** the total simulation time may require a tuning depending on the system size, energy injection and nature of the motion being excited. Considering a large scale global motion, there is a trade-off between the energy injection and the total simulation time. Larger amounts of energy allows a shorter simulation time, however, this may not be advised as discussed above.
 - **Excitation direction update:** as described above, the direction is updated after the system has traveled a distance of *0.5 Å* along the excitation vector and its real displacement has a deviation of *60°* with respect to the theoretical one. The update can also be affected by the amount of energy injected, since higher energy values leads to larger motions. In addition, after each correction the new vector loses directionality due to anharmonic effects. This means that, at a given point, the new vectors are so diffuse that there is no point in proceed the simulation. When this ponit is reached, it is necessary to recompute the normal modes and start again. This is one more reason to not inject high energy values and let the system undergoes the changes slowly.
 - **Number of modes and replicas:** the program do a linear combination of the supplied normal modes to compute the excitation direction. This imply that the more modes are provided, the more replicas will be necessary to cover the hyperspace described by these modes.
-- **Atom selection:** create an atom selection to apply the energy injection using [MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html). Must be written between quotes.
+- **Atom selection:** create an atom selection to apply the energy injection using *[MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html)*. Must be written between quotes.
+
+[Back to top ↩](#)
+* ****
+
+## Input Requirements
+
+### Run
+#### Parameters: 
+- **`-type`/`--type`**: Normal modes model type, **`CA`** ENM, **`HEAVY`** Atoms ENM or **`CHARMM`** (**required**. Default: **`CA`**)
+
+- **`-nm`/`--modes`**: Normal modes to excite (**optional**. Default: **`7,8,9`**)
+
+- **`-ek`/`--energy`**: Excitation energy injection (**optional**. Default: **`0.125`** kcal/mol)
+
+- **`-t`/`--time`**: Simulation time (**optional**. Default: **`250`** ps)
+
+- **`-sel`/`--selection`**: Atom selection to apply the energy injection (**optional**. Default: **`"protein"`**)
+
+- **`-rep`/`--replicas`**: Number of replicas to run (**optional**. Default: **`10`**)
+
+
+#### Files:
+- **`-psf`/`--psffile`**: PSF structure file containing system molecule-specific information (**required**)
+  
+- **`-pdb`/`--pdbfile`**: PDB structure file in Protein Data Bank format (**required**)
+
+- **`-xsc`/`--xscfile`**: NAMD eXtended System Configuration file (**required**)
+
+- **`-coor`/`--coorfile`**: NAMD binary coordinates file (**required**)
+
+- **`-vel`/`--velfile`**: NAMD binary velocities file (**required**)
+
+- **`-str`/`--strfile`**: CHARMM-style stream file, which contains force field parameters and definitions (**required**)
+  
+- **`-mod`/`--modefile`**: Binary file containg CHARMM normal mode vectors (**optional**. Required only if **`-type = CHARMM`**)
+
+#### Feature Flags
+
+- **`--no_correc`**: Disable excitation vector direction correction and compute standard MDeNM
+
+- **`--fixed`**: Disable excitation vector correction and keep constant excitation energy injections
+
+### Append
+#### Parameters: 
+- **`-t`/`--time`**: Simulation time (**optional**. Default: **`250`** ps)
 
 [Back to top ↩](#)
 * ****
@@ -141,6 +224,18 @@ python pyAdMD.py run -type CA -psf setup.psf -pdb system.pdb -coor system.coor -
 
 ```
 python pyAdMD.py run -type HEAVY -mod modes.mod -psf setup.psf -pdb system.pdb -coor system.coor -vel system.vel -xsc system.xsc -str system.str --no_correc
+```
+
+### Restart unfinished pyAdMD simulations
+
+```
+python pyAdMD.py restart
+```
+
+### Append 100 ps to previously finished pyAdMD simulations
+
+```
+python pyAdMD.py append -t 100
 ```
 
 ### Clean previous setup files
