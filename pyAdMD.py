@@ -1,25 +1,23 @@
 """
-The MDeNM (Molecular Dynamics with excited Normal Modes) method consists of
-multiple-replica short MD simulations in which motions described by a given
-subset of low-frequency NMs are kinetically excited. This is achieved by
-injecting additional atomic velocities along several randomly determined
-linear combinations of NM vectors, thus allowing an efficient coupling
-between slow and fast motions.
+The MDeNM (Molecular Dynamics with excited Normal Modes) mmethod uses
+multiple short MD simulations where specific low-frequency normal modes
+are kinetically excited. This approach injects additional atomic velocities
+along randomly determined linear combinations of NM vectors, creating an
+effective coupling between slow and fast molecular motions.
 
-This new approach, aMDeNM, automatically controls the energy injection and
-take the natural constraints imposed by the structure and the environment
-into account during protein conformational sampling, which prevent structural
-distortions all along the simulation. Due to the stochasticity of thermal
-motions, NM eigenvectors move away from the original directions when used to
-displace the protein, since the structure evolves into other potential energy
-wells. Therefore, the displacement along the modes is valid for small
-distances, but the displacement along greater distances may deform the
-structure of the protein if no care is taken. The advantage of this method is
-to adaptively change the direction used to displace the system, taking into
-account the structural and energetic constraints imposed by the system itself
-and the medium, which allows the system to explore new pathways.
+Our enhanced approach, aMDeNM, automatically manages energy injection while
+respecting the natural constraints imposed by the protein structure and its
+environment during conformational sampling. This prevents structural distortions
+throughout the simulation. Since thermal motions are inherently stochastic,
+normal mode eigenvectors naturally evolve as the structure moves between
+potential energy wells. While small displacements along modes work well,
+larger displacements could potentially deform the protein structure without
+proper safeguards. The key advantage of our method is its ability to adaptively
+adjust displacement directions based on structural and energetic constraints
+from both the system and its environment, enabling exploration of new pathways.
 
-This program provides a Python implementation of the aMDeNM method.
+This Python implementation brings the aMDeNM method to the community in an
+accessible, user-friendly package.
 """
 
 import argparse
@@ -32,28 +30,37 @@ import time
 import csv
 import json
 import glob
+import tempfile
+import traceback
+import warnings
 from pathlib import Path
+import seaborn as sns
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing as mp
-import warnings
 
-# Ignore MDAnalysis attribute warnings raised during ENM computation
+# Ignore MDAnalysis attribute warnings during ENM computation
 warnings.filterwarnings("ignore", module='MDAnalysis')
-# Ignore Bio deprecation warnings raised by MDAnalysis calling
+# Ignore Bio deprecation warnings from MDAnalysis calls
 warnings.filterwarnings("ignore", module='Bio')
 
+# Third-party imports
 try:
     import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from matplotlib import colors
     from scipy.spatial.distance import pdist, squareform
     from scipy.linalg import eigh
     from scipy.sparse import diags
+    import cupy as cp
     import numba
     from numba import njit, prange, float64, int32
-    import matplotlib.pyplot as plt
-    from matplotlib import colors
-    import cupy as cp
+
+    # Bio/chemistry-specific imports
     import MDAnalysis as mda
     from MDAnalysis.analysis import align
+    from Bio.PDB import PDBParser, ShrakeRupley
     import openmm as mm
     from openmm import app, unit, Platform
 except ImportError as e:
@@ -65,30 +72,34 @@ class ConsoleConfig:
     """
     Configuration class for PyAdMD application providing console styling and messages.
 
-    Attributes
-    ----------
-    BLK, TLE, HGH, WRN, ERR, EXT, STD : str
-        ANSI escape codes for console text styling
-    PGM_NAM, PGM_WRN, PGM_ERR : str
-        Formatted program output prefixes
-    LOGO : str
-        ASCII art logo for the application
-    VERSION : str
-        Application version number
-    CITATION : str
-        Citation information for the method
-    MESSAGE : str
-        Brief description of the program
+    This class contains ANSI escape codes for console text styling, formatted program
+    output prefixes, and application metadata such as version and citation information.
+
+    Attributes:
+        BLK (str): ANSI code for blinking cyan text
+        TLE (str): ANSI code for light background title style
+        HGH (str): ANSI code for bold highlighted text
+        WRN (str): ANSI code for warning (yellow) text
+        ERR (str): ANSI code for error (red) text
+        EXT (str): ANSI code for success/emphasis (green) text
+        STD (str): ANSI code to reset text styling
+        PGM_NAM (str): Formatted prefix for normal messages
+        PGM_WRN (str): Formatted prefix for warnings
+        PGM_ERR (str): Formatted prefix for errors
+        LOGO (str): ASCII art logo for the application
+        VERSION (str): Application version number
+        CITATION (str): Citation information for the method
+        MESSAGE (str): Brief program description
     """
 
     # Style variables
-    BLK = '\033[5;36m'
-    TLE = '\033[2;106m'
-    HGH = '\033[1;100m'
-    WRN = '\033[33m'
-    ERR = '\033[31m'
-    EXT = '\033[32m'
-    STD = '\033[0m'
+    BLK = '\033[5;36m'    # Blinking cyan
+    TLE = '\033[2;106m'   # Light background title
+    HGH = '\033[1;100m'   # Bold highlighted
+    WRN = '\033[33m'      # Warning yellow
+    ERR = '\033[31m'      # Error red
+    EXT = '\033[32m'      # Success green
+    STD = '\033[0m'       # Reset styling
 
     # Program output variables
     PGM_NAM = f"..:{EXT}pyAdMD> {STD}"
@@ -109,7 +120,7 @@ class ConsoleConfig:
     ░░░░░       ░░░░░░
     '''
 
-    VERSION = '1.2'
+    VERSION = '1.3'
     CITATION = '''  Please cite:
 
     \tAdaptive collective motions: a hybrid method to improve
@@ -120,38 +131,133 @@ class ConsoleConfig:
     MESSAGE = "This program can setup and run multi-replica aMDeNM simulations through NAMD."
 
 
-class ENMCalculator:
+class ParameterStorage:
+    """Handles serialization and deserialization of simulation parameters.
+
+    This class provides functionality to save and load simulation parameters
+    to/from JSON files, enabling restart capabilities for the aMDeNM simulations.
+
+    Attributes:
+        console (ConsoleConfig): Console configuration object for formatted output.
+        param_file (str): Default filename for parameter storage.
     """
-    Class for Elastic Network Model calculations.
+
+    def __init__(self, console):
+        """Initialize ParameterStorage with console configuration.
+
+        Args:
+            console (ConsoleConfig): Console configuration object for formatted output.
+        """
+        self.console = console
+        self.param_file = "pyAdMD_params.json"
+
+    def save_parameters(self, args, factors, nm_parsed, end_loop, cwd):
+        """Save simulation parameters to a JSON file.
+
+        Serializes the current simulation state including command line arguments,
+        mode combination factors, selected modes, and loop information for
+        potential restart capabilities.
+
+        Args:
+            args (argparse.Namespace): Command line arguments namespace.
+            factors (numpy.ndarray): Matrix of combination factors for normal modes (P×N).
+            nm_parsed (list): List of mode numbers used in combinations.
+            end_loop (int): Final loop iteration count for simulation cycles.
+            cwd (str): Current working directory path.
+
+        Note:
+            The timestamp is automatically added to track when parameters were saved.
+        """
+        params = {
+            "args": vars(args),
+            "factors": factors.tolist() if factors is not None else None,
+            "nm_parsed": nm_parsed,
+            "end_loop": end_loop,
+            "cwd": cwd,
+            "timestamp": time.time()
+        }
+
+        with open(self.param_file, 'w') as f:
+            json.dump(params, f, indent=4)
+
+        print(f"\n{self.console.PGM_NAM}Parameters saved to {self.console.EXT}{self.param_file}{self.console.STD}")
+
+    def load_parameters(self):
+        """Load simulation parameters from a JSON file.
+
+        Attempts to deserialize previously saved parameters and reconstruct
+        the argument namespace object. Handles conversion of factors back to
+        numpy array format.
+
+        Returns:
+            Dictionary containing loaded parameters with keys:
+            - args: Reconstructed argument namespace
+            - factors: Combination factors as numpy array
+            - nm_parsed: List of mode numbers
+            - end_loop: Final loop iteration
+            - cwd: Working directory path
+            - timestamp: Save timestamp
+
+            Returns None if loading fails.
+
+        Raises:
+            JSONDecodeError: If the parameter file contains invalid JSON.
+            IOError: If the parameter file cannot be accessed.
+        """
+        if not os.path.exists(self.param_file):
+            print(f"{self.console.PGM_ERR}Parameter file {self.console.ERR}{self.param_file}{self.console.STD} not found.")
+            return None
+
+        try:
+            with open(self.param_file, 'r') as f:
+                params = json.load(f)
+
+            # Reconstruct args namespace
+            class Args:
+                def __init__(self, dict_args):
+                    for key, value in dict_args.items():
+                        setattr(self, key, value)
+
+            params['args'] = Args(params['args'])
+
+            # Convert factors back to numpy array if present
+            if params['factors'] is not None:
+                params['factors'] = np.array(params['factors'])
+
+            print(f"{self.console.PGM_NAM}Parameters loaded from {self.console.EXT}{self.param_file}{self.console.STD}")
+            return params
+        except Exception as e:
+            print(f"{self.console.PGM_ERR}Error loading parameters: {self.console.ERR}{e}{self.console.STD}")
+            return None
+
+
+class ENMCalculator:
+    """Elastic Network Model calculator for normal mode analysis.
 
     This class handles the computation of elastic network models, including
     system creation, Hessian matrix computation, and normal mode analysis.
 
-    Parameters
-    ----------
-    console : ConsoleConfig
-        Console configuration object for formatted output
+    Attributes:
+        console (ConsoleConfig): Console configuration object for formatted output.
     """
 
     def __init__(self, console):
+        """Initialize ENMCalculator with console configuration.
+
+        Args:
+            console (ConsoleConfig): Console configuration object for formatted output.
+        """
         self.console = console
 
     def compute_enm(self, coorfile, nm_type, nm_parsed, input_dir, psffile):
-        """
-        Setup and run ENM analysis.
+        """Setup and run ENM analysis.
 
-        Parameters
-        ----------
-        coorfile : str
-            Input coordinate file name
-        nm_type : str
-            Type of normal mode calculation ('CA' or 'HEAVY')
-        nm_parsed : list
-            List containing mode numbers to analyze
-        input_dir : str
-            Input directory path
-        psffile : str
-            PSF topology filename
+        Args:
+            coorfile (str): Input coordinate file name.
+            nm_type (str): Type of normal mode calculation ('CA' or 'HEAVY').
+            nm_parsed (list): List containing mode numbers to analyze.
+            input_dir (str): Input directory path.
+            psffile (str): PSF topology filename.
         """
         # Create output folder
         base_name = os.path.splitext(os.path.basename(coorfile))[0]
@@ -207,38 +313,25 @@ class ENMCalculator:
         print(f"{self.console.PGM_NAM}Results saved to {self.console.EXT}{output_prefix}_{prefix}_*.npy{self.console.STD} files")
 
     def create_system(self, pdb_file, model_type='ca', cutoff=None, spring_constant=1.0, output_prefix="input"):
+        """Create an Elastic Network Model system based on specified model type.
+
+        Args:
+            pdb_file (str): Path to the input PDB file.
+            model_type (str): Type of model to create: 'ca' for Cα-only or 'heavy' for heavy-atom ENM.
+            cutoff (float): Cutoff distance for interactions in Å.
+            spring_constant (float): Spring constant for the ENM bonds in kcal/mol/Å².
+            output_prefix (str): Prefix for output files.
+
+        Returns:
+            Tuple containing:
+                - system (openmm.System): The created OpenMM system
+                - topology (openmm.app.Topology): The topology of the system
+                - positions (list): The positions of particles in the system
+
+        Raises:
+            ValueError: If an unknown model type is specified.
         """
-        Create an Elastic Network Model system based on the specified model type.
-
-        Parameters
-        ----------
-        pdb_file : str
-            Path to the input PDB file
-        model_type : str, optional
-            Type of model to create: 'ca' for Cα-only or 'heavy' for heavy-atom ENM
-        cutoff : float, optional
-            Cutoff distance for interactions in Å. If None, uses default values:
-            15.0Å for CA model, 12.0Å for heavy-atom model
-        spring_constant : float, optional
-            Spring constant for the ENM bonds in kcal/mol/Å²
-        output_prefix : str, optional
-            Prefix for output files
-
-        Returns
-        -------
-        system : openmm.System
-            The created OpenMM system
-        topology : openmm.app.Topology
-            The topology of the system
-        positions : openmm.unit.Quantity
-            The positions of particles in the system
-
-        Raises
-        ------
-        ValueError
-            If an unknown model type is specified
-        """
-        # Set default cutoffs if not provided
+        # Set default cutoffs if not provided: 15.0Å for CA model, 12.0Å for heavy-atom model
         if cutoff is None:
             cutoff = 15.0 if model_type == 'ca' else 12.0
 
@@ -250,28 +343,19 @@ class ENMCalculator:
             raise ValueError(f"Unknown model type: {self.console.ERR}{model_type}{self.console.STD}")
 
     def _create_ca_system(self, pdb_file, cutoff, spring_constant, output_prefix):
-        """
-        Create a Cα-only Elastic Network Model system.
+        """Create a Cα-only Elastic Network Model system.
 
-        Parameters
-        ----------
-        pdb_file : str
-            Path to the input PDB file
-        cutoff : float
-            Cutoff distance for interactions in Å
-        spring_constant : float
-            Spring constant for the ENM bonds in kcal/mol/Å²
-        output_prefix : str
-            Prefix for output files
+        Args:
+            pdb_file (str): Path to the input PDB file.
+            cutoff (float): Cutoff distance for interactions in Å.
+            spring_constant (float): Spring constant for the ENM bonds in kcal/mol/Å².
+            output_prefix (str): Prefix for output files.
 
-        Returns
-        -------
-        system : openmm.System
-            The created OpenMM system
-        topology : openmm.app.Topology
-            The topology of the system
-        positions : openmm.unit.Quantity
-            The positions of particles in the system
+        Returns:
+            Tuple containing:
+                - system (openmm.System): The created OpenMM system
+                - topology (openmm.app.Topology): The topology of the system
+                - positions (list): The positions of particles in the system
         """
         pdb = app.PDBFile(pdb_file)
 
@@ -342,7 +426,7 @@ class ENMCalculator:
         ca_pdb_file = f"{output_prefix}_ca_structure.pdb"
         with open(ca_pdb_file, 'w') as f:
             app.PDBFile.writeFile(new_topology, positions_quantity, f)
-        print(f"{self.console.PGM_NAM}C-alpha structure saved to {self.console.EXT}{ca_pdb_file}{self.console.STD}.")
+        print(f"{self.console.PGM_NAM}Cα structure saved to {self.console.EXT}{ca_pdb_file}{self.console.STD}.")
 
         # Convert HETATM to ATOM
         self.convert_hetatm_to_atom(ca_pdb_file)
@@ -350,28 +434,19 @@ class ENMCalculator:
         return system, new_topology, positions_quantity
 
     def _create_heavy_system(self, pdb_file, cutoff, spring_constant, output_prefix):
-        """
-        Create a heavy-atom Elastic Network Model system.
+        """Create a heavy-atom Elastic Network Model system.
 
-        Parameters
-        ----------
-        pdb_file : str
-            Path to the input PDB file
-        cutoff : float
-            Cutoff distance for interactions in Å
-        spring_constant : float
-            Spring constant for the ENM bonds in kcal/mol/Å²
-        output_prefix : str
-            Prefix for output files
+        Args:
+            pdb_file (str): Path to the input PDB file.
+            cutoff (float): Cutoff distance for interactions in Å.
+            spring_constant (float): Spring constant for the ENM bonds in kcal/mol/Å².
+            output_prefix (str): Prefix for output files.
 
-        Returns
-        -------
-        system : openmm.System
-            The created OpenMM system
-        topology : openmm.app.Topology
-            The topology of the system
-        positions : openmm.unit.Quantity
-            The positions of particles in the system
+        Returns:
+            Tuple containing:
+                - system (openmm.System): The created OpenMM system
+                - topology (openmm.app.Topology): The topology of the system
+                - positions (list): The positions of particles in the system
         """
         pdb = app.PDBFile(pdb_file)
 
@@ -398,7 +473,7 @@ class ENMCalculator:
 
         for i, (orig_idx, residue, name, element) in enumerate(heavy_atoms):
             if residue not in residue_map:
-                new_res = new_topology.addResidue(f"{residure.name}{residue.id}", new_chain)
+                new_res = new_topology.addResidue(f"{residue.name}{residue.id}", new_chain)
                 residue_map[residue] = new_res
             new_topology.addAtom(name, element, residue_map[residue])
 
@@ -448,13 +523,10 @@ class ENMCalculator:
 
     @staticmethod
     def convert_hetatm_to_atom(pdb_file):
-        """
-        Convert HETATM records to ATOM in PDB files for compatibility with visualization tools.
+        """Convert HETATM records to ATOM in PDB files for compatibility.
 
-        Parameters
-        ----------
-        pdb_file : str
-            Path to the PDB file to convert
+        Args:
+            pdb_file (str): Path to the PDB file to convert.
         """
         with open(pdb_file, 'r') as f:
             lines = f.readlines()
@@ -474,24 +546,16 @@ class ENMCalculator:
     @staticmethod
     @njit(float64[:,:](float64[:,:], float64[:,:], float64, int32), parallel=True, fastmath=True)
     def compute_hessian(pos_array, bonds, k_val, n_particles):
-        """
-        Compute the Hessian matrix for an Elastic Network Model using CPU parallelization.
+        """Compute the Hessian matrix for an Elastic Network Model using CPU parallelization.
 
-        Parameters
-        ----------
-        pos_array : ndarray
-            Array of particle positions (N×3)
-        bonds : ndarray
-            Array of bonds with format [i, j, r0] for each bond
-        k_val : float
-            Spring constant
-        n_particles : int
-            Number of particles in the system
+        Args:
+            pos_array (numpy.ndarray): Array of particle positions (N×3).
+            bonds (numpy.ndarray): Array of bonds with format [i, j, r0] for each bond.
+            k_val (float): Spring constant.
+            n_particles (int): Number of particles in the system.
 
-        Returns
-        -------
-        hessian : ndarray
-            The computed Hessian matrix (3N×3N)
+        Returns:
+            hessian (numpy.ndarray): The computed Hessian matrix (3N×3N).
         """
         n_dof = 3 * n_particles
         hessian = np.zeros((n_dof, n_dof), dtype=np.float64)
@@ -524,25 +588,17 @@ class ENMCalculator:
         return hessian
 
     def hessian_enm(self, system, positions):
-        """
-        Build, compute and regularize Hessian matrix for an Elastic Network Model.
+        """Build, compute and regularize Hessian matrix for an Elastic Network Model.
 
-        Parameters
-        ----------
-        system : openmm.System
-            The system containing the ENM force
-        positions : openmm.unit.Quantity
-            The positions of particles in the system
+        Args:
+            system (openmm.System): The system containing the ENM force.
+            positions (list): The positions of particles in the system.
 
-        Returns
-        -------
-        hessian : ndarray
-            The computed Hessian matrix (3N×3N)
+        Returns:
+            hessian (numpy.ndarray): The computed Hessian matrix (3N×3N).
 
-        Raises
-        ------
-        ValueError
-            If no ENM force is found in the system
+        Raises:
+            ValueError: If no ENM force is found in the system.
         """
         n_particles = system.getNumParticles()
         n_dof = 3 * n_particles
@@ -578,20 +634,14 @@ class ENMCalculator:
 
     @staticmethod
     def mass_weight_hessian(hessian, system):
-        """
-        Apply mass-weighting to the Hessian matrix.
+        """Apply mass-weighting to the Hessian matrix.
 
-        Parameters
-        ----------
-        hessian : ndarray
-            The Hessian matrix to mass-weight
-        system : openmm.System
-            The system containing particle masses
+        Args:
+            hessian (numpy.ndarray): The Hessian matrix to mass-weight.
+            system (openmm.System): The system containing particle masses.
 
-        Returns
-        -------
-        mw_hessian : ndarray
-            The mass-weighted Hessian matrix
+        Returns:
+            mw_hessian (numpy.ndarray): The mass-weighted Hessian matrix.
         """
         n_particles = system.getNumParticles()
         masses = np.array([system.getParticleMass(i).value_in_unit(unit.dalton) for i in range(n_particles)])
@@ -606,22 +656,16 @@ class ENMCalculator:
 
     @staticmethod
     def gpu_diagonalization(hessian, n_modes=None):
-        """
-        Diagonalize the Hessian matrix using GPU acceleration.
+        """Diagonalize the Hessian matrix using GPU acceleration.
 
-        Parameters
-        ----------
-        hessian : ndarray
-            The Hessian matrix to diagonalize
-        n_modes : int, optional
-            Number of modes to compute. If None, computes all modes.
+        Args:
+            hessian (numpy.ndarray): The Hessian matrix to diagonalize.
+            n_modes (int): Number of modes to compute. If None, computes all modes.
 
-        Returns
-        -------
-        eigenvalues : ndarray
-            The eigenvalues of the Hessian matrix
-        eigenvectors : ndarray
-            The eigenvectors of the Hessian matrix
+        Returns:
+            Tuple containing:
+                - eigenvalues (numpy.ndarray): The eigenvalues of the Hessian matrix
+                - eigenvectors (numpy.ndarray): The eigenvectors of the Hessian matrix
         """
         # Use memory pool for efficient GPU memory management
         mem_pool = cp.get_default_memory_pool()
@@ -665,26 +709,18 @@ class ENMCalculator:
         return eigenvalues_cpu, eigenvectors_cpu
 
     def compute_normal_modes(self, hessian, n_modes=None, use_gpu=False):
-        """
-        Compute normal modes by diagonalizing the Hessian matrix.
+        """Compute normal modes by diagonalizing the Hessian matrix.
 
-        Parameters
-        ----------
-        hessian : ndarray
-            The Hessian matrix to diagonalize
-        n_modes : int, optional
-            Number of modes to compute. If None, computes all modes.
-        use_gpu : bool, optional
-            Whether to use GPU acceleration for diagonalization
+        Args:
+            hessian (numpy.ndarray): The Hessian matrix to diagonalize.
+            n_modes (int): Number of modes to compute. If None, computes all modes.
+            use_gpu (bool): Whether to use GPU acceleration for diagonalization.
 
-        Returns
-        -------
-        frequencies : ndarray
-            The frequencies of the normal modes
-        modes : ndarray
-            The normal mode vectors
-        eigenvalues : ndarray
-            The eigenvalues of the Hessian matrix
+        Returns:
+            Tuple containing:
+                - frequencies (numpy.ndarray): The frequencies of the normal modes
+                - modes (numpy.ndarray): The normal mode vectors
+                - eigenvalues (numpy.ndarray): The eigenvalues of the Hessian matrix
         """
         start_time = time.time()
 
@@ -735,27 +771,17 @@ class ENMCalculator:
         return sorted_frequencies, sorted_modes, eigenvalues
 
     def write_nm_vectors(self, modes, frequencies, system, topology, nm, output_prefix, pdb_file, model_type='ca'):
-        """
-        Write normal mode eigenvectors to separate XYZ files for the complete protein structure.
+        """Write normal mode eigenvectors to XYZ files for complete protein structure.
 
-        Parameters
-        ----------
-        modes : ndarray
-            The normal mode vectors (3N×M)
-        frequencies : ndarray
-            The frequencies of the normal modes
-        system : openmm.System
-            The system containing particle information
-        topology : openmm.app.Topology
-            The topology of the system
-        nm : int
-            Mode to write
-        output_prefix : str
-            Prefix for output XYZ files
-        pdb_file : str
-            Path to the original PDB file to get complete atom information
-        model_type : str
-            Type of model ('charmm', 'ca' or 'heavy')
+        Args:
+            modes (numpy.ndarray): The normal mode vectors (3N×M).
+            frequencies (numpy.ndarray): The frequencies of the normal modes.
+            system (openmm.System): The system containing particle information.
+            topology (openmm.app.Topology): The topology of the system.
+            nm (int): Mode number to write.
+            output_prefix (str): Prefix for output XYZ files.
+            pdb_file (str): Path to the original PDB file to get complete atom information.
+            model_type (str): Type of model ('ca' or 'heavy').
         """
         # Read the original PDB file to get complete atom information
         pdb = app.PDBFile(pdb_file)
@@ -818,41 +844,43 @@ class ENMCalculator:
 
 
 class ModeExciter:
-    """
-    Class for combining and exciting normal modes.
+    """Handles the generation and excitation of normal mode combinations.
 
-    This class handles the generation of linear combinations of normal modes
-    and the application of excitation energy to these modes.
+    This class is responsible for generating linear combinations of normal modes,
+    applying excitation energy to these modes, and writing the resulting vectors
+    to files for use in molecular dynamics simulations.
 
-    Parameters
-    ----------
-    console : ConsoleConfig
-        Console configuration object for formatted output
+    Attributes:
+        console (ConsoleConfig): Console configuration object for formatted output.
     """
 
     def __init__(self, console):
+        """Initialize the ModeExciter with console configuration.
+
+        Args:
+            console (ConsoleConfig): Console configuration object for formatted output.
+        """
         self.console = console
 
     def generate_factors(self, P, N, cwd, nm_parsed):
-        """
-        Generate factors for linear combinations of N orthonormal vectors
-        that produce P points uniformly distributed on a N-dimensional hypersphere surface.
+        """Generate factors for linear combinations of normal modes.
 
-        Parameters
-        ----------
-        P : int
-            Number of points to generate
-        N : int
-            Dimensionality of the space
-        cwd : str
-            Current working directory
-        nm_parsed : list
-            List of mode numbers
+        Generates P points uniformly distributed on an N-dimensional hypersphere
+        surface using a repulsion algorithm. For the special case where P=2N,
+        generates vertices of a cross-polytope.
 
-        Returns
-        -------
-        numpy.ndarray
-            P×N matrix of factors for linear combinations
+        Args:
+            P (int): Number of points to generate (number of replicas).
+            N (int): Dimensionality of the space (number of modes).
+            cwd (str): Current working directory path.
+            nm_parsed (list): List of mode numbers being combined.
+
+        Returns:
+            numpy.ndarray: P×N matrix of combination factors.
+
+        Notes:
+            Uses a repulsion algorithm to spread points evenly on the hypersphere.
+            For P=2N, generates cross-polytope vertices for optimal distribution.
         """
         # Store the modes indexes
         N = len(nm_parsed)
@@ -931,17 +959,12 @@ class ModeExciter:
         return factors
 
     def _write_factors_csv(self, factors, nm_parsed, cwd):
-        """
-        Write combination factors to a CSV file.
+        """Write combination factors to a CSV file.
 
-        Parameters
-        ----------
-        factors : numpy.ndarray
-            Matrix of factors for linear combinations
-        nm_parsed : list
-            List of mode numbers
-        cwd : str
-            Current working directory
+        Args:
+            factors (numpy.ndarray): Matrix of combination factors (P×N).
+            nm_parsed (list): List of mode numbers used in combinations.
+            cwd (str): Current working directory path.
         """
         # Create the header
         header = ['Combination'] + [f'Mode {mode}' for mode in nm_parsed]
@@ -965,25 +988,19 @@ class ModeExciter:
         print(f"{self.console.PGM_NAM}Combination factors written at {self.console.EXT}{output_folder}/factors.csv{self.console.STD}.")
 
     def combine_modes(self, replicas, modes, factors, nm_type, coorfile, cwd, mda_U):
-        """
-        Combine, normalize and write normal modes.
+        """Combine normal modes and write resulting vectors.
 
-        Parameters
-        ----------
-        replicas : int
-            Number of replicas to compute
-        modes : list
-            List of integers containing the normal mode numbers
-        factors : numpy.ndarray
-            Matrix of factors for linear combinations
-        nm_type : str
-            Type of normal mode calculation ('CHARMM', 'CA' or 'HEAVY')
-        coorfile : str
-            Coordinate filename
-        cwd : str
-            Current working directory
-        mda_U : MDAnalysis.Universe
-            System structure
+        Creates linear combinations of specified normal modes using precomputed
+        factors, normalizes the resulting vectors, and writes them to files.
+
+        Args:
+            replicas (int): Number of replicas to process.
+            modes (list): List of mode numbers to combine.
+            factors (numpy.ndarray): Matrix of combination factors (P×N).
+            nm_type (str): Type of normal mode calculation ('CHARMM', 'CA', or 'HEAVY').
+            coorfile (str): Coordinate filename for reference.
+            cwd (str): Current working directory path.
+            mda_U (mda.Universe): MDAnalysis Universe containing system structure.
         """
         # Set output folder
         output_folder = f"{cwd}/rep-struct-list"
@@ -1014,23 +1031,18 @@ class ModeExciter:
         print(f"{self.console.PGM_NAM}Combination vectors written at {self.console.EXT}{output_folder}/rep*_vector.vec{self.console.STD}.")
 
     def excite(self, q_vector, user_ek, sel_mass):
-        """
-        Scale the combined normal modes to be used as additional
-        velocities during aMDeNM simulations.
+        """Scale combined modes to apply excitation energy.
 
-        Parameters
-        ----------
-        q_vector : matrix
-            Combined vector to excite
-        user_ek : float
-            User defined excitation energy
-        sel_mass : array
-            Selection atomic mass
+        Args:
+            q_vector (numpy.ndarray): Combined normal mode vector to excite.
+            user_ek (float): Excitation energy in kcal/mol.
+            sel_mass (numpy.ndarray): Atomic masses of selected atoms.
 
-        Returns
-        -------
-        matrix
-            Excitation vector
+        Returns:
+            numpy.ndarray: Scaled excitation vector.
+
+        Notes:
+            The excitation vector is scaled according to: v = q * sqrt(2E/m)
         """
         # Excite
         fscale = np.sqrt((2 * user_ek) / sel_mass)
@@ -1039,17 +1051,12 @@ class ModeExciter:
         return exc_vec
 
     def _write_vector(self, xyz, output_file, mda_U):
-        """
-        Write a set of coordinates in a new file.
+        """Write coordinate vector to file in NAMDBIN format.
 
-        Parameters
-        ----------
-        xyz : array
-            Vector containing the xyz coordinates
-        output_file : str
-            Output file name
-        mda_U : MDAnalysis.Universe
-            System structure
+        Args:
+            xyz (numpy.ndarray): Coordinate array to write.
+            output_file (str): Output filename.
+            mda_U (mda.Universe): MDAnalysis Universe for reference structure.
         """
         # Copy the xyz coordinates into the dataframe
         sys_zeros = mda_U.atoms.select_atoms("all")
@@ -1061,133 +1068,50 @@ class ModeExciter:
         sys_zeros.write(output_file, file_format="NAMDBIN")
 
 
-class ParameterStorage:
-    """
-    Class to store and retrieve simulation parameters.
-
-    This class handles the serialization and deserialization of simulation
-    parameters to/from JSON files for restart capabilities.
-
-    Parameters
-    ----------
-    console : ConsoleConfig
-        Console configuration object for formatted output
-    """
-
-    def __init__(self, console):
-        self.console = console
-        self.param_file = "pyAdMD_params.json"
-
-    def save_parameters(self, args, factors, nm_parsed, end_loop, cwd):
-        """
-        Save simulation parameters to a JSON file.
-
-        Parameters
-        ----------
-        args : argparse.Namespace
-            Command line arguments
-        factors : numpy.ndarray
-            Matrix of factors for linear combinations
-        nm_parsed : list
-            List of mode numbers
-        end_loop : int
-            Final loop iteration count
-        cwd : str
-            Current working directory
-        """
-        params = {
-            "args": vars(args),
-            "factors": factors.tolist() if factors is not None else None,
-            "nm_parsed": nm_parsed,
-            "end_loop": end_loop,
-            "cwd": cwd,
-            "timestamp": time.time()
-        }
-
-        with open(self.param_file, 'w') as f:
-            json.dump(params, f, indent=4)
-
-        print(f"\n{self.console.PGM_NAM}Parameters saved to {self.console.EXT}{self.param_file}{self.console.STD}")
-
-    def load_parameters(self):
-        """
-        Load simulation parameters from a JSON file.
-
-        Returns
-        -------
-        dict or None
-            Loaded parameters dictionary or None if loading failed
-        """
-        if not os.path.exists(self.param_file):
-            print(f"{self.console.PGM_ERR}Parameter file {self.console.ERR}{self.param_file}{self.console.STD} not found.")
-            return None
-
-        try:
-            with open(self.param_file, 'r') as f:
-                params = json.load(f)
-
-            # Reconstruct args namespace
-            class Args:
-                def __init__(self, dict_args):
-                    for key, value in dict_args.items():
-                        setattr(self, key, value)
-
-            params['args'] = Args(params['args'])
-
-            # Convert factors back to numpy array if present
-            if params['factors'] is not None:
-                params['factors'] = np.array(params['factors'])
-
-            print(f"{self.console.PGM_NAM}Parameters loaded from {self.console.EXT}{self.param_file}{self.console.STD}")
-            return params
-        except Exception as e:
-            print(f"{self.console.PGM_ERR}Error loading parameters: {self.console.ERR}{e}{self.console.STD}")
-            return None
-
-
 class SimulationRunner:
-    """
-    Class to handle running, restarting, and appending simulations.
+    """Handles running, restarting, and appending aMDeNM simulations.
 
     This class provides a unified interface for managing simulation runs,
     including initialization, execution, and cleanup of replica simulations.
 
-    Parameters
-    ----------
-    console : ConsoleConfig
-        Console configuration object for formatted output
-    args : argparse.Namespace
-        Command line arguments
-    cwd : str
-        Current working directory
-    input_dir : str
-        Input directory path
-    psffile : str
-        PSF topology file path
-    pdbfile : str
-        PDB structure file path
-    coorfile : str
-        Coordinate file path
-    velfile : str
-        Velocity file path
-    xscfile : str
-        Extended system configuration file path
-    strfile : str
-        Structure file path
-    sel_mass : array
-        Atomic masses of selected atoms
-    init_coor : array
-        Initial coordinates of selected atoms
-    energy : float
-        Excitation energy value
-    mode_exciter : ModeExciter
-        Mode exciter instance
-    sys_pdb : MDAnalysis.Universe
-        System structure universe
+    Attributes:
+        console (ConsoleConfig): Console configuration object for formatted output.
+        args (argparse.Namespace): Command line arguments.
+        cwd (str): Current working directory.
+        input_dir (str): Input directory path.
+        psffile (str): PSF topology file path.
+        pdbfile (str): PDB structure file path.
+        coorfile (str): Coordinate file path.
+        velfile (str): Velocity file path.
+        xscfile (str): Extended system configuration file path.
+        strfile (str): Structure file path.
+        sel_mass (np.ndarray): Atomic masses of selected atoms.
+        init_coor (np.ndarray): Initial coordinates of selected atoms.
+        energy (float): Excitation energy value.
+        mode_exciter (ModeExciter): Mode exciter instance.
+        sys_pdb (mda.Universe): System structure universe.
     """
-
     def __init__(self, console, args, cwd, input_dir, psffile, pdbfile, coorfile,
                  velfile, xscfile, strfile, sel_mass, init_coor, energy, mode_exciter, sys_pdb):
+        """Initialize SimulationRunner with all required components.
+
+        Args:
+            console (ConsoleConfig): Console configuration object for formatted output.
+            args (argparse.Namespace): Command line arguments.
+            cwd (str): Current working directory.
+            input_dir (str): Input directory path.
+            psffile (str): PSF topology file path.
+            pdbfile (str): PDB structure file path.
+            coorfile (str): Coordinate file path.
+            velfile (str): Velocity file path.
+            xscfile (str): Extended system configuration file path.
+            strfile (str): Structure file path.
+            sel_mass (numpy.ndarray): Atomic masses of selected atoms.
+            init_coor (numpy.ndarray): Initial coordinates of selected atoms.
+            energy (float): Excitation energy value.
+            mode_exciter (ModeExciter): Mode exciter instance.
+            sys_pdb (mda.Universe): System structure universe.
+        """
         self.console = console
         self.args = args
         self.cwd = cwd
@@ -1212,24 +1136,22 @@ class SimulationRunner:
         self.globfreq = self.cos_alpha = self.qrms_correc = 0.5
 
     def run_simulation(self, rep, start_loop, end_loop, correction_state=None):
-        """
-        Run simulation for a specific replica.
+        """Run simulation for a specific replica.
 
-        Parameters
-        ----------
-        rep : int
-            Replica number
-        start_loop : int
-            Starting loop index
-        end_loop : int
-            Ending loop index
-        correction_state : dict, optional
-            Correction state for restart/append
+        Handles both new simulations and restarts by managing simulation state,
+        energy correction, and trajectory analysis.
 
-        Returns
-        -------
-        dict
-            Final correction state after simulation completion
+        Args:
+            rep (int): Replica number to simulate.
+            start_loop (int): Starting loop index (0 for new simulations).
+            end_loop (int): Ending loop index.
+            correction_state (dict): Dictionary containing correction state for restart/append.
+
+        Returns:
+            dict: Dictionary containing final correction state after simulation completion.
+
+        Raises:
+            SystemExit: If NAMD simulation fails to execute properly.
         """
         rep_dir = f"{self.cwd}/rep{rep}"
 
@@ -1479,14 +1401,1089 @@ class SimulationRunner:
         }
 
 
-def parse_arguments():
-    """
-    Parse command-line arguments for the pyAdMD analysis.
+class Analyzer:
+    """Analyzes simulation results and generates plots.
 
-    Returns
-    -------
-    argparse.Namespace
-        Parsed command-line arguments
+    This class handles computation and visualization of various structural
+    properties from simulation trajectories including RMSD, radius of gyration,
+    SASA, hydrophobic exposure, secondary structure, and RMSF.
+
+    Attributes:
+        console (ConsoleConfig): Console configuration object for formatted output
+        param_file (str): Path to parameter JSON file
+        rough (bool): If True, analyze every 5ps instead of every frame
+    """
+    def __init__(self, console, param_file="pyAdMD_params.json", rough=False):
+        """Initializes Analyzer with configuration and parameters.
+
+        Args:
+            console (ConsoleConfig): Console configuration object for formatted output
+            param_file (str): Path to parameter JSON file
+            rough (bool): If True, analyze every 5ps instead of every frame
+        """
+        self.console = console
+        self.param_file = param_file
+        self.rough = rough
+        self.params = self._load_parameters()
+
+        # Create analysis directory
+        self.analysis_dir = "analysis"
+        os.makedirs(self.analysis_dir, exist_ok=True)
+
+        # Set plotting style
+        plt.style.use('default')
+        sns.set_style("whitegrid")
+        plt.rcParams['figure.figsize'] = [6, 6]
+        plt.rcParams['figure.dpi'] = 100
+
+        # Determine number of CPU cores to use
+        self.num_cores = mp.cpu_count()
+        print(f"{self.console.PGM_NAM}Using {self.console.EXT}{self.num_cores}{self.console.STD} CPU cores for parallel processing")
+
+    def _load_parameters(self):
+        """Loads simulation parameters from JSON file.
+
+        Returns:
+            dict: Dictionary of loaded parameters or None if loading fails
+        """
+        if not os.path.exists(self.param_file):
+            print(f"{self.console.PGM_ERR}Parameter file {self.console.ERR}{self.param_file}{self.console.STD} not found.")
+            return None
+
+        try:
+            with open(self.param_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"{self.console.PGM_ERR}Error loading parameters: {self.console.ERR}{e}{self.console.STD}")
+            return None
+
+    def analyze_all_replicas(self):
+        """
+        Analyze all replicas and generate plots.
+
+        This method processes all replica directories, computes structural
+        properties, generates visualizations, and creates summary reports.
+        """
+        start_time = time.time()
+
+        if self.params is None:
+            return
+
+        cwd = self.params.get('cwd', os.getcwd())
+        args = self.params['args']
+        replicas = args.get('replicas', 10)
+        sim_time = args.get('time', 250)  # Total simulation time in ps
+
+        all_data = []
+        all_rmsf_data = []  # Store RMSF data per residue
+
+        # Prepare arguments for parallel processing
+        replica_args = []
+        replica_dirs = []
+        for rep in range(1, replicas + 1):
+            rep_dir = f"{cwd}/rep{rep}"
+            if not os.path.exists(rep_dir):
+                print(f"{self.console.PGM_WRN}{self.console.WRN}Replica {rep}{self.console.STD} directory not found, skipping.")
+                continue
+
+            # Create replica-specific analysis directory
+            rep_analysis_dir = f"{self.analysis_dir}/rep{rep}"
+            os.makedirs(rep_analysis_dir, exist_ok=True)
+
+            replica_args.append((rep_dir, rep, sim_time, rep_analysis_dir))
+            replica_dirs.append(rep_dir)
+
+        # Print analysis settings once
+        if replica_dirs:
+            print(f"{self.console.PGM_NAM}Analyzing {self.console.EXT}{len(replica_dirs)}{self.console.STD} replicas in parallel using CPU...\n")
+            if self.rough:
+                # Estimate frame step from first replica
+                try:
+                    coord_files = sorted(glob.glob(f"{replica_dirs[0]}/step_*.coor"))
+                    if coord_files:
+                        u = mda.Universe(f"{replica_dirs[0]}/../inputs/{self.params['args']['psffile'].split('/')[-1]}",
+                                        coord_files, format="NAMDBIN")
+                        n_frames = len(u.trajectory)
+                        frame_step = max(1, int(5 / (sim_time / n_frames)))
+                        print(f"{self.console.PGM_NAM}Using rough analysis: analyzing every {self.console.EXT}{frame_step}{self.console.STD}"
+                              f" frames ({frame_step * (sim_time/n_frames):.1f} ps)\n")
+                except:
+                    pass
+
+        # Process replicas in parallel using CPU cores
+        if replica_args:
+            # Use multiprocessing for CPU-bound tasks
+            with mp.Pool(processes=min(self.num_cores, len(replica_args))) as pool:
+                # Create a progress tracking function
+                def update_progress(result):
+                    nonlocal completed
+                    completed += 1
+                    rep_num, _, _ = result  # Unpack the result tuple
+                    print(f"{self.console.PGM_NAM}Completed analysis of {self.console.EXT}Replica {rep_num}{self.console.STD}"
+                          f" [{self.console.EXT}{completed}{self.console.STD}/{self.console.WRN}{len(replica_args)}{self.console.STD}]")
+
+                completed = 0
+                results = []
+
+                # Submit all tasks
+                for args in replica_args:
+                    res = pool.apply_async(self._analyze_replica_parallel, args, callback=update_progress)
+                    results.append(res)
+
+                # Wait for all results
+                for res in results:
+                    rep_num, rep_data, rep_rmsf_data = res.get()  # Unpack all three values
+                    if rep_data:
+                        all_data.extend(rep_data)
+                    if rep_rmsf_data:
+                        all_rmsf_data.extend(rep_rmsf_data)
+
+        else:
+            print(f"{self.console.PGM_WRN}No replicas found for analysis.")
+
+        if not all_data:
+            print(f"{self.console.PGM_WRN}No analysis data was generated.")
+            return
+
+        # Save RMSF data to separate CSV
+        csv_file = f"{self.analysis_dir}/rmsf.csv"
+        self._save_to_csv(all_rmsf_data, csv_file)
+        print(f"\n{self.console.PGM_NAM}Average RMSF results saved to {self.console.EXT}{csv_file}{self.console.STD}")
+
+        # Save all data to CSV
+        csv_file = f"{self.analysis_dir}/analysis_results.csv"
+        self._save_to_csv(all_data, csv_file)
+        print(f"{self.console.PGM_NAM}Analysis results saved to {self.console.EXT}{csv_file}{self.console.STD}")
+
+        # Generate plots
+        self._generate_plots(all_data, sim_time)
+
+        # Generate RMSF plots
+        self._generate_rmsf_avg_plot(all_rmsf_data)
+
+        # Generate HTML summary
+        self._generate_html_summary(all_data, sim_time)
+
+        duration = time.time() - start_time
+        print(f"\n{self.console.PGM_NAM}Analysis complete in {self.console.EXT}{duration:.2f}{self.console.STD} seconds.")
+        print(f"{self.console.PGM_NAM}Results saved into {self.console.EXT}{self.analysis_dir}{self.console.STD} folder.")
+
+    def _analyze_replica_parallel(self, rep_dir, rep_num, sim_time, rep_analysis_dir):
+        """Analyzes a single simulation replica in parallel.
+
+        Args:
+            rep_dir (str): Path to replica directory
+            rep_num (int): Replica number identifier
+            sim_time (int): Total simulation time in picoseconds
+            rep_analysis_dir (str): Output directory for replica-specific analysis
+
+        Returns:
+            Tuple containing:
+                - data (list): List of analysis data dictionaries
+                - data_rmsf (list): List of RMSF data dictionaries
+        """
+        try:
+            print(f"{self.console.PGM_NAM}Starting analysis of {self.console.EXT}Replica {rep_num}{self.console.STD}...")
+            result = self.analyze_replica(rep_dir, rep_num, sim_time, rep_analysis_dir)
+            return (rep_num, result[0], result[1])  # Return rep_num along with data
+        except Exception as e:
+            print(f"{self.console.PGM_ERR}Error analyzing {self.console.ERR}replica {rep_num}{self.console.STD}: {self.console.ERR}{e}{self.console.STD}")
+            return (rep_num, [], [])  # Return rep_num even on error
+
+    def analyze_replica(self, rep_dir, rep_num, sim_time, rep_analysis_dir):
+        """Analyzes a single simulation replica.
+
+        Args:
+            rep_dir (str): Path to replica directory
+            rep_num (int): Replica number identifier
+            sim_time (int): Total simulation time in picoseconds
+            rep_analysis_dir (str): Output directory for replica-specific analysis
+
+        Returns:
+            Tuple containing:
+                - data (list): List of analysis data dictionaries
+                - data_rmsf (list): List of RMSF data dictionaries
+        """
+        # Find all coordinate files
+        coord_files = sorted(glob.glob(f"{rep_dir}/step_*.coor"))
+        if not coord_files:
+            print(f"{self.console.PGM_WRN}No coordinate files found for {self.console.WRN}replica {rep_num}{self.console.STD}")
+            return [], []
+
+        # Load PSF file
+        psf_file = f"{rep_dir}/../inputs/{self.params['args']['psffile'].split('/')[-1]}"
+        if not os.path.exists(psf_file):
+            print(f"{self.console.PGM_ERR}PSF file not found for replica {self.console.ERR}{rep_num}{self.console.STD}")
+            return [], []
+
+        try:
+            # Create universe
+            u = mda.Universe(psf_file, coord_files, format="NAMDBIN")
+
+            # Get the actual number of frames
+            n_frames = len(u.trajectory)
+
+            # Calculate time points (assuming each step is 0.2 ps)
+            time_points = np.linspace(0, sim_time, n_frames)
+
+            # Determine frame step for rough analysis
+            frame_step = 1
+            if self.rough:
+                # Calculate step to get approximately 5ps intervals
+                frame_step = max(1, int(5 / (sim_time / n_frames)))
+                # Don't print this for each replica - already printed once
+
+            # Store reference positions from first frame
+            u.trajectory[0]
+
+            # Get consistent atom selection for RMSD and Rg calculations
+            try:
+                # Try to select protein atoms
+                selection = u.select_atoms("protein")
+                if len(selection) == 0:
+                    # If no protein, use all atoms
+                    selection = u.select_atoms("all")
+            except:
+                # Fallback to all atoms
+                selection = u.select_atoms("all")
+
+            ref_positions = selection.positions.copy()
+
+            data = []
+            # Don't print individual computation messages for each replica
+
+            for i, ts in enumerate(u.trajectory):
+                # Skip frames if rough analysis is enabled
+                if self.rough and i % frame_step != 0:
+                    continue
+
+                # Ensure we don't exceed the time_points array bounds
+                if i >= len(time_points):
+                    break
+
+                frame_data = {
+                    'replica': rep_num,
+                    'time': time_points[i],
+                    'rmsd': self._calc_rmsd(selection, ref_positions),
+                    'radius_gyration': self._calc_rog(selection),
+                    'sasa': self._calc_sasa(u, rep_num, i),
+                    'hydrophobic_exposure': self._calculate_hp(u)
+                }
+
+                # Calculate secondary structure for selected frames only
+                if not self.rough or i % (frame_step * 5) == 0:  # Less frequent for SS to save time
+                    ss_data = self._calc_ss(u, rep_num, i)
+                    frame_data.update(ss_data)
+                else:
+                    # Use previous frame's SS data for rough analysis
+                    if data and 'helix' in data[-1]:
+                        for key in ['helix', 'sheet', 'coil', 'turn', 'other']:
+                            frame_data[key] = data[-1].get(key, 0)
+                    else:
+                        # Default values if no previous data
+                        frame_data.update({'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0})
+
+                data.append(frame_data)
+
+            # Calculate RMSF per residue (Cα atoms)
+            rmsf_data = self._calc_rmsf(u, rep_num)
+
+            # Generate replica-specific plots
+            self._generate_replica_plots(data, rmsf_data, sim_time, rep_analysis_dir, rep_num)
+
+            return data, rmsf_data
+        except Exception as e:
+            print(f"{self.console.PGM_ERR}Error analyzing {self.console.ERR}replica {rep_num}{self.console.STD}: {self.console.ERR}{e}{self.console.STD}")
+            traceback.print_exc()
+            return [], []
+
+    def _process_frame(self, u, selection, ref_positions, frame_idx, time_val, rep_num, frame_step):
+        """Process a single frame and compute all properties.
+
+        Args:
+            u (mda.Universe): MDAnalysis Universe object
+            selection (mda.AtomGroup): Atom selection for analysis
+            ref_positions (numpy.ndarray): Reference positions for RMSD
+            frame_idx (int): Frame index
+            time_val (float): Time value for this frame
+            rep_num (int): Replica number
+            frame_step (int): Frame step for rough analysis
+
+        Returns:
+            dict: Frame data dictionary
+        """
+        u.trajectory[frame_idx]
+
+        frame_data = {
+            'replica': rep_num,
+            'time': time_val,
+            'rmsd': self._calc_rmsd(selection, ref_positions),
+            'radius_gyration': self._calc_rog(selection),
+            'sasa': self._calc_sasa(u, rep_num, frame_idx),
+            'hydrophobic_exposure': self._calculate_hp(u)
+        }
+
+        # Calculate secondary structure for selected frames only
+        if not self.rough or frame_idx % (frame_step * 5) == 0:  # Less frequent for SS to save time
+            ss_data = self._calc_ss(u, rep_num, frame_idx)
+            frame_data.update(ss_data)
+        else:
+            # Default values if no SS calculation
+            frame_data.update({'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0})
+
+        return frame_data
+
+    def _calc_rmsd(self, selection, ref_positions):
+        """Calculates RMSD against reference positions.
+
+        Args:
+            selection (mda.AtomGroup): Atom selection to calculate RMSD for
+            ref_positions (numpy.ndarray): Reference positions for comparison
+
+        Returns:
+            float: Calculated RMSD value in Angstroms
+        """
+        try:
+            if len(selection) == 0:
+                return 0
+
+            # Ensure we're comparing the same number of atoms
+            if len(selection.positions) != len(ref_positions):
+                return 0
+
+            # Calculate RMSD
+            rmsd = np.sqrt(np.mean(np.sum((selection.positions - ref_positions) ** 2, axis=1)))
+            return rmsd
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not calculate RMSD: {e}")
+            return 0
+
+    def _calc_rog(self, selection):
+        """Calculates radius of gyration.
+
+        Args:
+            selection (mda.AtomGroup): Atom selection to calculate Rg for
+
+        Returns:
+            float: Calculated radius of gyration in Angstroms
+        """
+        try:
+            if len(selection) == 0:
+                return 0
+
+            # Get coordinates
+            coordinates = selection.positions
+
+            # Calculate center of geometry
+            cog = np.mean(coordinates, axis=0)
+
+            # Calculate squared distances from center
+            squared_distances = np.sum((coordinates - cog) ** 2, axis=1)
+
+            # Calculate radius of gyration
+            Rg = np.sqrt(np.mean(squared_distances))
+            return Rg
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not calculate radius of gyration: {e}")
+            return 0
+
+    def _calc_sasa(self, u, rep_num, frame_idx):
+        """Calculates solvent accessible surface area using Bio.PDB.SASA.
+
+        Args:
+            u (mda.Universe): MDAnalysis Universe object
+            rep_num (int): Replica number identifier
+            frame_idx (int): Frame index number
+
+        Returns:
+            float: Total SASA value in square Angstroms
+        """
+        try:
+            # Write temporary PDB file for this frame
+            temp_pdb = tempfile.NamedTemporaryFile(suffix='.pdb', delete=False)
+            u.atoms.write(temp_pdb.name)
+            temp_pdb.close()
+
+            # Parse with Biopython
+            parser = PDBParser()
+            structure = parser.get_structure('temp', temp_pdb.name)
+
+            # Calculate SASA using Shrake-Rupley algorithm
+            sasa_calculator = ShrakeRupley()
+            sasa_calculator.compute(structure, level="S")
+
+            # Get total SASA
+            total_sasa = 0
+            for atom in structure.get_atoms():
+                total_sasa += atom.sasa
+
+            # Clean up
+            os.unlink(temp_pdb.name)
+            return total_sasa
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not calculate SASA: {e}")
+            # Fallback to simple estimation
+            try:
+                selection = u.select_atoms("protein")
+                if len(selection) == 0:
+                    selection = u.select_atoms("all")
+                return len(selection) * 15  # Approximate 15 Å² per atom
+            except:
+                return 0
+
+    def _calculate_hp(self, universe):
+        """Calculates percentage of hydrophobic residues in the protein.
+
+        Args:
+            universe (mda.Universe): MDAnalysis Universe object
+
+        Returns:
+            float: Percentage of hydrophobic residues
+        """
+        try:
+            # Define hydrophobic residues
+            hydrophobic_residues = ['ALA', 'VAL', 'LEU', 'ILE', 'MET', 'PHE', 'TRP', 'PRO']
+
+            # Select hydrophobic atoms
+            hydrophobic_sel = f"protein and (resname {' '.join(hydrophobic_residues)})"
+            hydrophobic_atoms = universe.select_atoms(hydrophobic_sel)
+
+            # Simple metric: ratio of hydrophobic atoms to total protein atoms
+            total_protein_atoms = len(universe.select_atoms("protein"))
+            exposure_ratio = len(hydrophobic_atoms) / total_protein_atoms if total_protein_atoms > 0 else 0
+            return exposure_ratio * 100  # Return as percentage
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not calculate hydrophobic exposure: {e}")
+            return 0
+
+    def _calc_rmsf(self, universe, rep_num):
+        """Calculates RMSF per residue for Cα atoms using CPU only.
+
+        Args:
+            universe (mda.Universe): MDAnalysis Universe object
+            rep_num (int): Replica number identifier
+
+        Returns:
+            list: List of dictionaries containing RMSF data per residue
+        """
+        try:
+            # Select Cα atoms
+            calphas = universe.select_atoms("protein and name CA")
+            if len(calphas) == 0:
+                print(f"{self.console.PGM_WRN}No Cα atoms found for RMSF calculation")
+                return []
+
+            # Use CPU implementation
+            return self._calc_rmsf_cpu(universe, calphas, rep_num)
+
+        except Exception as e:
+            print(f"{self.console.PGM_ERR}Error calculating RMSF: {e}")
+            return []
+
+    def _calc_rmsf_cpu(self, universe, calphas, rep_num):
+        """Calculate RMSF using CPU.
+
+        Args:
+            universe (mda.Universe): MDAnalysis Universe object
+            calphas (mda.AtomGroup): Cα atoms selection
+            rep_num (int): Replica number identifier
+
+        Returns:
+            list: List of dictionaries containing RMSF data per residue
+        """
+        # Align trajectory to first frame using Cα atoms
+        ref_coords = calphas.positions.copy()
+        rmsf_values = np.zeros(len(calphas))
+
+        # Calculate RMSF manually
+        for ts in universe.trajectory:
+            # Align to reference
+            mobile_coords = calphas.positions
+            R, rmsd = align.rotation_matrix(mobile_coords, ref_coords)
+            calphas.positions = np.dot(mobile_coords, R.T)
+
+            # Accumulate squared deviations
+            rmsf_values += np.sum((calphas.positions - ref_coords) ** 2, axis=1)
+
+        # Calculate RMSF
+        rmsf_values = np.sqrt(rmsf_values / len(universe.trajectory))
+
+        # Prepare RMSF data
+        rmsf_data = []
+        for i, atom in enumerate(calphas):
+            rmsf_data.append({
+                'replica': rep_num,
+                'residue_index': atom.residue.resid,
+                'residue_name': atom.residue.resname,
+                'rmsf': rmsf_values[i]
+            })
+
+        return rmsf_data
+
+    def _calc_ss(self, u, rep_num, frame_idx):
+        """Calculates secondary structure content using DSSP.
+
+        Args:
+            u (mda.Universe): MDAnalysis Universe object
+            rep_num (int): Replica number identifier
+            frame_idx (int): Frame index number
+
+        Returns:
+            dict: Dictionary with secondary structure counts
+        """
+        try:
+            # Select only protein atoms
+            protein = u.select_atoms("protein")
+            if len(protein) == 0:
+                print(f"{self.console.PGM_WRN}No protein atoms found for secondary structure analysis")
+                return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
+
+            # Create temporary PDB file
+            with tempfile.NamedTemporaryFile(suffix='.pdb', delete=False, mode='w') as temp_pdb:
+                pdb_path = temp_pdb.name
+
+                # Write a dummy header to avoid DSSP error
+                temp_pdb.write(f"HEADER     MDANALYSIS FRAME {frame_idx}: Created by PDBWriter\n")
+                temp_pdb.write("CRYST1    1.000    1.000    1.000  90.00  90.00  90.00 P 1           1\n")
+
+                # Write protein atoms to the PDB file
+                for i, atom in enumerate(protein.atoms):
+                    # Format atom record according to PDB specification
+                    record = "ATOM  "
+                    serial = str(i+1).rjust(5)
+                    name = atom.name.ljust(4)
+                    alt_loc = " "
+                    res_name = atom.resname.ljust(3)
+                    chain_id = "A"
+                    res_seq = str(atom.resid).rjust(4)
+                    i_code = " "
+                    x = "{:8.3f}".format(atom.position[0])
+                    y = "{:8.3f}".format(atom.position[1])
+                    z = "{:8.3f}".format(atom.position[2])
+                    occupancy = "  1.00"
+                    temp_factor = "  0.00"
+                    element = atom.element.rjust(2) if hasattr(atom, 'element') else "  "
+                    charge = "  "
+
+                    atom_line = f"{record}{serial} {name}{alt_loc}{res_name} {chain_id}{res_seq}{i_code}   {x}{y}{z}{occupancy}{temp_factor}          {element}{charge}\n"
+                    temp_pdb.write(atom_line)
+
+                # Add TER record at the end
+                temp_pdb.write("TER\n")
+
+            # Use DSSP command directly
+            try:
+                # Create temporary DSSP output file
+                with tempfile.NamedTemporaryFile(suffix='.dssp', delete=False) as temp_dssp:
+                    dssp_path = temp_dssp.name
+
+                # Run DSSP command
+                cmd = f"dssp {pdb_path} {dssp_path}"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+                # Clean up PDB file
+                os.unlink(pdb_path)
+
+                if result.returncode != 0:
+                    print(f"{self.console.PGM_WRN}DSSP command failed: {result.stderr}")
+                    # Clean up DSSP file
+                    os.unlink(dssp_path)
+                    return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
+
+                # Parse DSSP output
+                ss_data = self._parse_dssp_output(dssp_path)
+
+                # Clean up DSSP file
+                os.unlink(dssp_path)
+
+                return ss_data
+
+            except Exception as dssp_error:
+                print(f"{self.console.PGM_WRN}DSSP calculation failed: {dssp_error}")
+                # Clean up files if they exist
+                if os.path.exists(pdb_path):
+                    os.unlink(pdb_path)
+                if os.path.exists(dssp_path):
+                    os.unlink(dssp_path)
+                return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
+
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not calculate secondary structure: {e}")
+            return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
+
+    def _parse_dssp_output(self, dssp_path):
+        """Parses DSSP output file and counts secondary structure types.
+
+        Args:
+            dssp_path (str): Path to DSSP output file
+
+        Returns:
+            dict: Dictionary with secondary structure counts
+        """
+        ss_data = {
+            'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0
+        }
+
+        try:
+            with open(dssp_path, 'r') as f:
+                lines = f.readlines()
+
+            # DSSP format: secondary structure assignment is at position 16 (0-based index)
+            # Skip header lines (look for the line that starts with "  #")
+            start_parsing = False
+            processed_residues = set()
+
+            for line in lines:
+                if line.startswith("  #"):
+                    start_parsing = True
+                    continue
+
+                if start_parsing and len(line) > 16:
+                    # Extract residue identifier to avoid double-counting
+                    residue_id = line[5:10].strip()  # Residue number
+                    chain_id = line[10:12].strip()   # Chain identifier
+                    unique_id = f"{chain_id}_{residue_id}"
+
+                    # Skip if we've already processed this residue
+                    if unique_id in processed_residues:
+                        continue
+
+                    processed_residues.add(unique_id)
+
+                    ss_type = line[16]
+
+                    if ss_type in ['H', 'G', 'I']:
+                        ss_data['helix'] += 1
+                    elif ss_type in ['E', 'B']:
+                        ss_data['sheet'] += 1
+                    elif ss_type == 'T':
+                        ss_data['turn'] += 1
+                    elif ss_type == ' ':
+                        ss_data['coil'] += 1
+                    else:
+                        ss_data['other'] += 1
+
+            return ss_data
+
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not parse DSSP output: {e}")
+            return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
+
+    def _plot_ss_rep(self, df, sim_time, rep_analysis_dir, rep_num):
+        """Creates secondary structure plot for a single replica.
+
+        Args:
+            df (pandas.DataFrame): DataFrame containing analysis data
+            sim_time (int): Total simulation time in picoseconds
+            rep_analysis_dir (str): Output directory for plots
+            rep_num (int): Replica number identifier
+        """
+        try:
+            plt.figure(figsize=(6, 6))
+
+            # Create stacked area plot for this replica
+            plt.stackplot(df['time'],
+                         df['helix'],
+                         df['sheet'],
+                         df['coil'],
+                         df['turn'],
+                         df['other'],
+                         labels=['Helix', 'Sheet', 'Coil', 'Turn', 'Other'],
+                         alpha=0.8)
+
+            plt.xlabel('Time (ps)')
+            plt.ylabel('Number of Residues')
+            plt.title(f'Secondary Structure Evolution - Replica {rep_num}')
+            plt.xlim(0, sim_time)
+            plt.legend(loc='upper left')
+            plt.grid(True, alpha=0.3)
+
+            # Save plot
+            plt.savefig(f"{rep_analysis_dir}/secondary_structure.png", bbox_inches='tight', dpi=300)
+            plt.close()
+
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not create secondary structure plot for replica {rep_num}: {e}")
+
+    def _save_to_csv(self, data, csv_file):
+        """Saves analysis data to CSV file.
+
+        Args:
+            data (list): List of data dictionaries to save
+            csv_file (str): Output CSV file path
+        """
+        if not data:
+            print(f"{self.console.PGM_WRN}No data to save to CSV.")
+            return
+
+        # Convert to DataFrame and save
+        df = pd.DataFrame(data)
+        df.to_csv(csv_file, index=False)
+
+    def _plot_rmsf_rep(self, rmsf_data, rep_analysis_dir, rep_num):
+        """Creates RMSF plot for a single replica.
+
+        Args:
+            rmsf_data (list): List of RMSF data dictionaries
+            rep_analysis_dir (str): Output directory for plots
+            rep_num (int): Replica number identifier
+        """
+        try:
+            rmsf_df = pd.DataFrame(rmsf_data)
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(rmsf_df['residue_index'], rmsf_df['rmsf'], 'b-', linewidth=1.5)
+            plt.xlabel('Residue Index')
+            plt.ylabel('RMSF (Å)')
+            plt.title(f'RMSF per Residue (Cα) - Replica {rep_num}')
+            plt.grid(True, alpha=0.3)
+
+            # Save plot
+            plt.savefig(f"{rep_analysis_dir}/rmsf_plot.png", bbox_inches='tight', dpi=300)
+            plt.close()
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not create RMSF plot for replica {rep_num}: {e}")
+
+    def _generate_html_summary(self, data, sim_time):
+        """Generates an HTML summary of the analysis results.
+
+        Args:
+            data (list): List of analysis data dictionaries
+            sim_time (int): Total simulation time in picoseconds
+        """
+        if not data:
+            print(f"{self.console.PGM_WRN}No data to generate HTML summary.")
+            return
+
+        df = pd.DataFrame(data)
+
+        # Calculate statistics for each replica
+        summary_data = {}
+        for replica in df['replica'].unique():
+            rep_data = df[df['replica'] == replica]
+            replica_summary = {
+                'Final Helix (residues)': rep_data['helix'].iloc[-1] if not rep_data.empty else 0,
+                'Final Sheet (residues)': rep_data['sheet'].iloc[-1] if not rep_data.empty else 0,
+                'Final Coil (residues)': rep_data['coil'].iloc[-1] if not rep_data.empty else 0,
+                'Final Turn (residues)': rep_data['turn'].iloc[-1] if not rep_data.empty else 0,
+                'Final Other (residues)': rep_data['other'].iloc[-1] if not rep_data.empty else 0,
+                'Max RMSD (Å)': rep_data['rmsd'].max() if not rep_data.empty else 0,
+                'Final Radius of Gyration (Å)': rep_data['radius_gyration'].iloc[-1] if not rep_data.empty else 0,
+                'Final SASA (Å²)': rep_data['sasa'].iloc[-1] if not rep_data.empty else 0,
+                'Max Hydrophobic Exposure (%)': rep_data['hydrophobic_exposure'].max() if not rep_data.empty else 0
+            }
+            summary_data[f'Replica {replica}'] = replica_summary
+
+        # Calculate averages across all replicas
+        avg_summary = {}
+        for stat in ['helix', 'sheet', 'coil', 'turn', 'other', 'rmsd', 'radius_gyration', 'sasa', 'hydrophobic_exposure']:
+            if stat == 'rmsd' or stat == 'hydrophobic_exposure':
+                # For these, we want the max value for each replica, then average those
+                max_values = df.groupby('replica')[stat].max()
+                avg_summary[f'Average Max {stat.upper()}'] = max_values.mean()
+            else:
+                # For others, we want the final value for each replica, then average those
+                final_values = df.groupby('replica')[stat].last()
+                avg_summary[f'Average Final {stat.upper()}'] = final_values.mean()
+
+        # Generate HTML file with escaped curly braces in CSS
+        html_file = f"{self.analysis_dir}/analysis_summary.html"
+        with open(html_file, 'w') as f:
+            # Use double curly braces to escape them in the CSS part
+            html_template = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>PyAdMD Analysis Summary</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    h1 {{ color: #2c3e50; }}
+                    h2 {{ color: #34495e; border-bottom: 1px solid #bdc3c7; padding-bottom: 5px; }}
+                    table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                    th {{ background-color: #f2f2f2; }}
+                    .plot-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin: 20px 0; }}
+                    .plot-item {{ text-align: center; }}
+                    .plot-item img {{ max-width: 100%; height: auto; border: 1px solid #ddd; }}
+                </style>
+            </head>
+            <body>
+                <h1>PyAdMD Analysis Summary</h1>
+                <p>Generated on: {date}</p>
+
+                <h2>Summary Statistics</h2>
+                <h3>Individual Replica Results</h3>
+                {replica_tables}
+
+                <h3>Average Across All Replicas</h3>
+                <table>
+                    {avg_table_rows}
+                </table>
+
+                <h2>Analysis Plots</h2>
+                <div class="plot-grid">
+                    {plot_items}
+                </div>
+
+                <h2>Notes</h2>
+                <ul>
+                    <li>Secondary structure content is calculated using DSSP</li>
+                    <li>Values represent the number of residues in each secondary structure type</li>
+                    <li>SASA is calculated using Bio.PDB.SASA (Shrake-Rupley algorithm)</li>
+                    <li>For detailed analysis, see the files in the replica-specific subdirectories</li>
+                </ul>
+            </body>
+            </html>
+            """
+            f.write(html_template.format(
+                date=time.strftime("%Y-%m-%d %H:%M:%S"),
+                replica_tables=self._html_rep_tables(summary_data),
+                avg_table_rows=self._html_summary_avg_table(avg_summary),
+                plot_items=self._html_summary_plots()
+            ))
+
+        print(f"{self.console.PGM_NAM}HTML summary saved to {self.console.EXT}{html_file}{self.console.STD}")
+
+    def _generate_plots(self, data, sim_time):
+        """Generates plots from analysis data.
+
+        Args:
+            data (list): List of analysis data dictionaries
+            sim_time (int): Total simulation time in picoseconds
+        """
+        if not data:
+            print(f"{self.console.PGM_WRN}No data to generate plots.")
+            return
+
+        df = pd.DataFrame(data)
+
+        # Create individual plots for each property
+        properties = [
+            ('rmsd', 'RMSD (Å)', 'RMSD'),
+            ('radius_gyration', 'Radius of Gyration (Å)', 'Radius of Gyration'),
+            ('sasa', 'SASA (Å²)', 'SASA'),
+            ('hydrophobic_exposure', 'Hydrophobic Exposure (%)', 'Hydrophobic Exposure')
+        ]
+
+        for prop, ylabel, title in properties:
+            plt.figure(figsize=(8, 6))
+
+            for replica in df['replica'].unique():
+                rep_data = df[df['replica'] == replica]
+                plt.plot(rep_data['time'], rep_data[prop], label=f'Replica {replica}', alpha=0.7, linewidth=1.5)
+
+            plt.xlabel('Time (ps)')
+            plt.ylabel(ylabel)
+            plt.title(title)
+            plt.xlim(0, sim_time)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+
+            # Save individual plot
+            plt.savefig(f"{self.analysis_dir}/{prop}_plot.png", bbox_inches='tight', dpi=300)
+            plt.close()
+
+        # Create average secondary structure plot
+        self._generate_ss_avg_plot(df, sim_time)
+
+    def _generate_rmsf_avg_plot(self, rmsf_data):
+        """Generates average RMSF plot across all replicas.
+
+        Args:
+            rmsf_data (list): List of RMSF data dictionaries
+        """
+        if not rmsf_data:
+            print(f"{self.console.PGM_WRN}No RMSF data to generate plots.")
+            return
+
+        rmsf_df = pd.DataFrame(rmsf_data)
+
+        # Create average RMSF plot across all replicas
+        plt.figure(figsize=(10, 6))
+
+        # Group by residue index and calculate average RMSF
+        avg_rmsf = rmsf_df.groupby('residue_index')['rmsf'].mean().reset_index()
+
+        plt.plot(avg_rmsf['residue_index'], avg_rmsf['rmsf'], 'b-', linewidth=2, label='Average')
+        plt.xlabel('Residue Index')
+        plt.ylabel('RMSF (Å)')
+        plt.title('Average RMSF per Residue (Cα)')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+
+        # Save average plot
+        plt.savefig(f"{self.analysis_dir}/rmsf_average.png", bbox_inches='tight', dpi=300)
+        plt.close()
+
+    def _generate_ss_avg_plot(self, df, sim_time):
+        """Creates stacked area plot for average secondary structure.
+
+        Args:
+            df (pandas.DataFrame): DataFrame containing analysis data
+            sim_time (int): Total simulation time in picoseconds
+        """
+        try:
+            plt.figure(figsize=(8, 6))
+
+            # Group by time and calculate averages
+            time_groups = df.groupby('time')
+            avg_data = time_groups[['helix', 'sheet', 'coil', 'turn', 'other']].mean()
+
+            # Create stacked area plot
+            plt.stackplot(avg_data.index,
+                         avg_data['helix'],
+                         avg_data['sheet'],
+                         avg_data['coil'],
+                         avg_data['turn'],
+                         avg_data['other'],
+                         labels=['Helix', 'Sheet', 'Coil', 'Turn', 'Other'],
+                         alpha=0.8)
+
+            plt.xlabel('Time (ps)')
+            plt.ylabel('Number of Residues')
+            plt.title('Average Secondary Structure Evolution')
+            plt.xlim(0, sim_time)
+            plt.legend(loc='upper left')
+            plt.grid(True, alpha=0.3)
+
+            # Save plot
+            plt.savefig(f"{self.analysis_dir}/secondary_structure_average.png", bbox_inches='tight', dpi=300)
+            plt.close()
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not create average secondary structure plot: {e}")
+
+    def _html_rep_tables(self, summary_data):
+        """Generates HTML tables for replica summaries.
+
+        Args:
+            summary_data (dict): Dictionary containing replica summary data
+
+        Returns:
+            str: HTML string containing replica tables
+        """
+        html_tables = ""
+        for replica, stats in summary_data.items():
+            html_tables += f"""
+            <h4>{replica}</h4>
+            <table>
+                <tr><th>Metric</th><th>Value</th></tr>
+            """
+            for stat, value in stats.items():
+                if 'residues' in stat:
+                    html_tables += f"<tr><td>{stat}</td><td>{value:.0f}</td></tr>"
+                else:
+                    html_tables += f"<tr><td>{stat}</td><td>{value:.2f}</td></tr>"
+            html_tables += "</table>"
+        return html_tables
+
+    def _html_summary_avg_table(self, avg_summary):
+        """Generates HTML table for average summary.
+
+        Args:
+            avg_summary (dict): Dictionary containing average summary data
+
+        Returns:
+            str: HTML string containing average summary table
+        """
+        html_rows = ""
+        for stat, value in avg_summary.items():
+            if 'HELIX' in stat or 'SHEET' in stat or 'COIL' in stat or 'TURN' in stat or 'OTHER' in stat:
+                html_rows += f"<tr><td>{stat}</td><td>{value:.0f}</td></tr>"
+            else:
+                html_rows += f"<tr><td>{stat}</td><td>{value:.2f}</td></tr>"
+        return html_rows
+
+    def _html_summary_plots(self):
+        """Generates HTML img elements for plots.
+
+        Returns:
+            str: HTML string containing plot images
+        """
+        plot_files = [
+            "rmsd_plot.png", "radius_gyration_plot.png",
+            "sasa_plot.png", "hydrophobic_exposure_plot.png",
+            "rmsf_average.png", "secondary_structure_average.png"
+        ]
+
+        plot_items = ""
+        for plot_file in plot_files:
+            if os.path.exists(f"{self.analysis_dir}/{plot_file}"):
+                plot_items += f"""
+                <div class="plot-item">
+                    <img src="{plot_file}" alt="{plot_file.replace('_', ' ').replace('.png', '')}">
+                    <p>{plot_file.replace('_', ' ').replace('.png', '')}</p>
+                </div>
+                """
+        return plot_items
+
+    def _generate_replica_plots(self, data, rmsf_data, sim_time, rep_analysis_dir, rep_num):
+        """Generates plots for a single replica analysis.
+
+        Args:
+            data (list): List of analysis data dictionaries
+            rmsf_data (list): List of RMSF data dictionaries
+            sim_time (int): Total simulation time in picoseconds
+            rep_analysis_dir (str): Output directory for plots
+            rep_num (int): Replica number identifier
+        """
+        if not data:
+            return
+
+        df = pd.DataFrame(data)
+
+        # Create individual plots for each property
+        properties = [
+            ('rmsd', 'RMSD (Å)', 'RMSD'),
+            ('radius_gyration', 'Radius of Gyration (Å)', 'Radius of Gyration'),
+            ('sasa', 'SASA (Å²)', 'SASA'),
+            ('hydrophobic_exposure', 'Hydrophobic Exposure (%)', 'Hydrophobic Exposure'),
+        ]
+
+        for prop, ylabel, title in properties:
+            plt.figure(figsize=(6, 6))
+            plt.plot(df['time'], df[prop], label=f'Replica {rep_num}', color='blue', linewidth=2)
+            plt.xlabel('Time (ps)')
+            plt.ylabel(ylabel)
+            plt.title(f'{title} - Replica {rep_num}')
+            plt.xlim(0, sim_time)
+            plt.grid(True, alpha=0.3)
+
+            # Save individual plot
+            plt.savefig(f"{rep_analysis_dir}/{prop}_plot.png", bbox_inches='tight', dpi=300)
+            plt.close()
+
+        # Create RMSF plot for this replica
+        if rmsf_data:
+            self._plot_rmsf_rep(rmsf_data, rep_analysis_dir, rep_num)
+
+        # Create secondary structure plot for this replica
+        self._plot_ss_rep(df, sim_time, rep_analysis_dir, rep_num)
+
+        # Save replica data to CSV
+        csv_file = f"{rep_analysis_dir}/analysis_results.csv"
+        df.to_csv(csv_file, index=False)
+
+        # Save RMSF data to CSV
+        if rmsf_data:
+            rmsf_df = pd.DataFrame(rmsf_data)
+            rmsf_csv_file = f"{rep_analysis_dir}/rmsf.csv"
+            rmsf_df.to_csv(rmsf_csv_file, index=False)
+
+
+def parse_arguments():
+    """Parse command-line arguments for the pyAdMD analysis tool.
+
+    This function sets up the argument parser with subcommands for different
+    operational modes of the pyAdMD tool, including running simulations,
+    restarting, appending, analyzing, and cleaning.
+
+    Returns:
+        argparse.Namespace: Object containing parsed command-line arguments
+
+    Raises:
+        SystemExit: If invalid arguments are provided or help is requested
     """
     console = ConsoleConfig()
 
@@ -1498,7 +2495,7 @@ def parse_arguments():
 
     # Required arguments for run
     run_required = opt_run.add_argument_group('Required arguments')
-    run_required.add_argument('-type', '--type', action="store", type=str.upper,
+    run_required.add_argument('-type', '--modeltype', action="store", type=str.upper,
                              default="CA", required=True, choices=["CA", "HEAVY", "CHARMM"],
                              help="Compute ENM or use pre-computed CHARMM normal mode file (default: CA)")
     run_required.add_argument('-psf', '--psffile', action="store", type=str, required=True,
@@ -1531,9 +2528,9 @@ def parse_arguments():
 
     # Flags for run
     run_flags = opt_run.add_argument_group('Flags')
-    run_flags.add_argument('--no_correc', action='store_true',
+    run_flags.add_argument('-n', '--no_correc', action='store_true',
                           help='Compute standard MDeNM calculations')
-    run_flags.add_argument('--fixed', action='store_true',
+    run_flags.add_argument('-f', '--fixed', action='store_true',
                           help='Disable excitation vector correction and keep constant excitation energy injections')
 
     # RESTART subparser
@@ -1543,6 +2540,11 @@ def parse_arguments():
     opt_apnd = subparsers.add_parser('append', help="Extend previously computed simulations.")
     opt_apnd.add_argument('-t', '--time', action="store", type=int, required=True, default=100,
                          help="Simulation time to append (default: 100ps)")
+
+    # ANALYSIS subparser
+    opt_analyze = subparsers.add_parser('analyze', help="Analyze simulation results and generate plots.")
+    opt_analyze.add_argument('-r', '--rough', action='store_true',
+                            help='Perform rough analysis (every 5ps instead of every frame)')
 
     # CLEAN subparser
     subparsers.add_parser('clean', help="Erase all previous simulation files.")
@@ -1564,41 +2566,39 @@ def parse_arguments():
 
     # Validate conditional requirements
     if hasattr(args, 'option') and args.option == 'run':
-        if args.type == 'CHARMM' and not args.modefile:
+        if args.modeltype == 'CHARMM' and not args.modefile:
             opt_run.error("The -mod/--modefile argument is required when -type/--type is CHARMM")
 
     return args
 
 
 def unzip_file(filepath, dest_dir):
-    """
-    Extract files from a .zip compressed file.
+    """Extract files from a .zip compressed file.
 
-    Parameters
-    ----------
-    filepath : str
-        Path to .zip file
-    dest_dir : str
-        Path to destination folder
+    Args:
+        filepath (str): Path to .zip file to extract.
+        dest_dir (str): Path to destination folder for extracted files.
     """
     with zipfile.ZipFile(filepath, 'r') as compressed:
         compressed.extractall(dest_dir)
 
 
 def write_charmm_nm(nms_to_write, psffile, modefile, cwd):
-    """
-    Write CHARMM normal mode vectors in NAMD readable format.
+    """Write CHARMM normal mode vectors in NAMD readable format.
 
-    Parameters
-    ----------
-    nms_to_write : str
-        Comma-separated list of normal modes to write
-    psffile : str
-        PSF filename
-    modefile : str
-        Mode filename
-    cwd : str
-        Current working directory
+    This function:
+    1. Extracts CHARMM topology and parameter files
+    2. Creates input file listing modes to process
+    3. Executes CHARMM to generate mode vectors in NAMD format
+
+    Args:
+        nms_to_write (str): Comma-separated list of normal mode numbers to write.
+        psffile (str): Path to PSF topology file.
+        modefile (str): Path to CHARMM mode file.
+        cwd (str): Current working directory path.
+
+    Raises:
+        SystemExit: If CHARMM execution fails.
     """
     console = ConsoleConfig()
 
@@ -1621,23 +2621,21 @@ def write_charmm_nm(nms_to_write, psffile, modefile, cwd):
 
 
 def run_namd(conf_file, psffile, pdbfile, strfile, loop_step, deexcitation=False):
-    """
-    Configure and run NAMD simulations.
+    """Configure and run NAMD simulations.
 
-    Parameters
-    ----------
-    conf_file : str
-        NAMD configuration file
-    psffile : str
-        PSF filename
-    pdbfile : str
-        PDB filename
-    strfile : str
-        STR filename
-    loop_step : int
-        Current loop_step step
-    deexcitation : boolean, optional
-        Choose whether NAMD run is excitation or deexcitation
+    Replaces placeholder variables in NAMD configuration file and executes
+    NAMD3 for either excitation or deexcitation steps.
+
+    Args:
+        conf_file (pathlib.Path): Path to NAMD configuration file.
+        psffile (str): Path to PSF topology file.
+        pdbfile (str): Path to PDB structure file.
+        strfile (str): Path to STR structure file with box information.
+        loop_step (int): Current simulation step number.
+        deexcitation (bool): Whether to run deexcitation step (default: False).
+
+    Raises:
+        SystemExit: If NAMD execution fails.
     """
     console = ConsoleConfig()
 
@@ -1677,18 +2675,15 @@ def run_namd(conf_file, psffile, pdbfile, strfile, loop_step, deexcitation=False
 
 
 def find_last_completed_cycle(rep_dir):
-    """
-    Find the last completed cycle in a replica directory.
+    """Find the last completed cycle in a replica directory.
 
-    Parameters
-    ----------
-    rep_dir : str
-        Path to replica folder
+    Scans for coordinate files and extracts the highest cycle number.
 
-    Returns
-    -------
-    int
-        Last completed cycle number, or 0 if no cycles found
+    Args:
+        rep_dir (str): Path to replica directory to scan.
+
+    Returns:
+        int: Highest completed cycle number, or 0 if no cycles found.
     """
     coord_files = glob.glob(f"{rep_dir}/step_*.coor")
     if not coord_files:
@@ -1710,12 +2705,20 @@ def find_last_completed_cycle(rep_dir):
 
 
 def main():
-    """
-    Main function to run the PyAdMD application.
+    """Main entry point for the PyAdMD application.
 
-    This function serves as the entry point for the application, handling
-    command-line argument parsing, initialization of components, and
+    Handles command-line argument parsing, initialization of components, and
     execution of the requested operation (run, restart, append, or clean).
+
+    The function performs the following primary operations:
+    - Parses command-line arguments
+    - Initializes console configuration and component classes
+    - Handles different operational modes (run, restart, append, analyze, clean)
+    - Manages simulation setup, execution, and cleanup
+    - Coordinates file operations and parameter storage
+
+    Raises:
+        SystemExit: If required files are missing or critical errors occur during execution
     """
     console = ConsoleConfig()
 
@@ -1746,7 +2749,7 @@ def main():
     nm_parsed = factors = end_loop = None
     sel_mass = init_coor = sys_pdb = None
 
-    # RUNNING OPTIONS
+    ### RUN
     if args.option == 'run':
         print(f"{console.PGM_NAM}{console.TLE}Setup and run aMDeNM simulations{console.STD}\n")
 
@@ -1785,7 +2788,7 @@ def main():
             modefile = f"{input_dir}/{modefile.split('/')[-1]}"
 
         # Store parameters
-        nm_type = args.type.lower()
+        nm_type = args.modeltype.lower()
         modes = args.modes
         nm_parsed = [int(s) for s in modes.split(',')]
         energy = args.energy
@@ -1842,6 +2845,7 @@ def main():
         for rep in range(1, replicas + 1):
             sim_runner.run_simulation(rep, 0, end_loop)
 
+    ### RESTART
     elif args.option == 'restart':
         print(f"{console.PGM_NAM}{console.TLE}Restart unfinished pyAdMD simulation{console.STD}\n")
 
@@ -1866,7 +2870,7 @@ def main():
         strfile = f"{input_dir}/{args.strfile.split('/')[-1]}"
 
         # Get parameters from loaded args
-        nm_type = args.type.lower()
+        nm_type = args.modeltype.lower()
         energy = args.energy
         selection = args.selection
         replicas = args.replicas
@@ -1923,6 +2927,7 @@ def main():
 
             sim_runner.run_simulation(rep, last_cycle, end_loop, correction_state)
 
+    ### APPEND
     elif args.option == 'append':
         print(f"{console.PGM_NAM}{console.TLE}Append previous pyAdMD simulation{console.STD}\n")
 
@@ -1935,33 +2940,39 @@ def main():
         if params is None:
             sys.exit(1)
 
-        args = params['args']
+        args_dict = params['args']
         factors = params['factors']
         nm_parsed = params['nm_parsed']
         original_end_loop = params['end_loop']
         cwd = params['cwd']
 
-        # Calculate new end loop
+        # Calculate new end loop and update total time
         additional_steps = int(additional_time / (100 * 0.002))
         new_end_loop = original_end_loop + additional_steps
 
+        # Update the total simulation time in the parameters
+        original_time = args_dict.time
+        new_total_time = original_time + additional_time
+        args_dict.time = new_total_time
+
         params['end_loop'] = new_end_loop
-        param_storage.save_parameters(args, factors, nm_parsed, new_end_loop, cwd)
+        # Save parameters with updated time
+        param_storage.save_parameters(args_dict, factors, nm_parsed, new_end_loop, cwd)
 
         # Reconstruct file paths from stored args
         input_dir = f"{cwd}/inputs"
-        psffile = f"{input_dir}/{args.psffile.split('/')[-1]}"
-        pdbfile = f"{input_dir}/{args.pdbfile.split('/')[-1]}"
-        coorfile = f"{input_dir}/{args.coorfile.split('/')[-1]}"
-        velfile = f"{input_dir}/{args.velfile.split('/')[-1]}"
-        xscfile = f"{input_dir}/{args.xscfile.split('/')[-1]}"
-        strfile = f"{input_dir}/{args.strfile.split('/')[-1]}"
+        psffile = f"{input_dir}/{args_dict.psffile.split('/')[-1]}"
+        pdbfile = f"{input_dir}/{args_dict.pdbfile.split('/')[-1]}"
+        coorfile = f"{input_dir}/{args_dict.coorfile.split('/')[-1]}"
+        velfile = f"{input_dir}/{args_dict.velfile.split('/')[-1]}"
+        xscfile = f"{input_dir}/{args_dict.xscfile.split('/')[-1]}"
+        strfile = f"{input_dir}/{args_dict.strfile.split('/')[-1]}"
 
         # Get parameters from loaded args
-        nm_type = args.type.lower()
-        energy = args.energy
-        selection = args.selection
-        replicas = args.replicas
+        nm_type = args_dict.type.lower()
+        energy = args_dict.energy
+        selection = args_dict.selection
+        replicas = args_dict.replicas
 
         # Get some information from the system
         sys_pdb = mda.Universe(psffile, coorfile, format="NAMDBIN")
@@ -1970,7 +2981,7 @@ def main():
 
         # Initialize the simulation runner
         sim_runner = SimulationRunner(
-            console, args, cwd, input_dir, psffile, pdbfile, coorfile,
+            console, args_dict, cwd, input_dir, psffile, pdbfile, coorfile,
             velfile, xscfile, strfile, sel_mass, init_coor, energy,
             mode_exciter, sys_pdb
         )
@@ -2008,15 +3019,22 @@ def main():
 
             sim_runner.run_simulation(rep, original_end_loop, new_end_loop, correction_state)
 
+    ### ANALYZE
+    elif args.option == 'analyze':
+        print(f"{console.PGM_NAM}{console.TLE}Analyze pyAdMD results{console.STD}\n")
+        analyzer = Analyzer(console, rough=args.rough)
+        analyzer.analyze_all_replicas()
+
+    ### CLEAN
     elif args.option == 'clean':
         print(f"{console.PGM_NAM}{console.TLE}Clean previous pyAdMD setup files{console.STD}\n")
 
         # Removing previous replicas folders
         files = os.listdir(cwd)
         for item in files:
-            if item.endswith(".json"):
+            if item.endswith((".json", "summary.txt")):
                  os.remove(os.path.join(cwd, item))
-            if item.startswith("rep"):
+            if item.startswith(("rep", "analysis")):
                 shutil.rmtree(os.path.join(cwd, item), ignore_errors=True)
 
         # Removing previous configuration files

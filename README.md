@@ -45,14 +45,28 @@ This document will give an overview of the aMDeNM method and help to properly se
       - [Feature Flags](#feature-flags)
     - [Append](#append)
       - [Parameters:](#parameters-1)
+    - [Analysis](#analysis)
+      - [Feature Flags:](#feature-flags-1)
   - [Usage Examples](#usage-examples)
     - [Using CHARMM normal modes](#using-charmm-normal-modes)
     - [Using Cα-only ENM with custom parameters](#using-cα-only-enm-with-custom-parameters)
     - [Using heavy atoms without direction correction (standard MDeNM)](#using-heavy-atoms-without-direction-correction-standard-mdenm)
     - [Restart unfinished pyAdMD simulations](#restart-unfinished-pyadmd-simulations)
     - [Append 100 ps to previously finished pyAdMD simulations](#append-100-ps-to-previously-finished-pyadmd-simulations)
+    - [Roughly analyze pyAdMD simulations](#roughly-analyze-pyadmd-simulations)
     - [Clean previous setup files](#clean-previous-setup-files)
-  - [Analysis](#analysis)
+  - [Analysis](#analysis-1)
+    - [Structural Properties Calculated](#structural-properties-calculated)
+    - [Analysis Capabilities](#analysis-capabilities)
+      - [Parallel Processing](#parallel-processing)
+      - [Computational Requirements](#computational-requirements)
+    - [Analysis Modes](#analysis-modes)
+      - [Standard Analysis](#standard-analysis)
+      - [Rough Analysis](#rough-analysis)
+    - [Configuration Parameters](#configuration-parameters)
+    - [Output Structure](#output-structure)
+      - [Directory Organization](#directory-organization)
+    - [Output Files Description](#output-files-description)
   - [Citing](#citing)
   - [Dependencies](#dependencies)
   - [Contact](#contact)
@@ -203,6 +217,10 @@ The configuration process is straightforward. Some technical aspects will be cov
 #### Parameters: 
 - **`-t`/`--time`**: Simulation time (**optional**. Default: **`250`** ps)
 
+### Analysis
+#### Feature Flags: 
+- **`-r`/`--rough`**: Perform rough analysis (every **`5`** ps instead of every frame)
+
 [Back to top ↩](#)
 * ****
 
@@ -238,6 +256,12 @@ python pyAdMD.py restart
 python pyAdMD.py append -t 100
 ```
 
+### Roughly analyze pyAdMD simulations
+
+```
+python pyAdMD.py analyze -r
+```
+
 ### Clean previous setup files
 
 ```
@@ -247,13 +271,101 @@ python pyAdMD.py clean
 [Back to top ↩](#)
 * ****
 
-  ## Analysis
-The MDeNM scripts run some basic analysis at the end of the simulation. Inside each replica folder, they can be found as follows:
+## Analysis
+The PyAdMD **`analysis`** module provides comprehensive analysis capabilities for molecular dynamics simulations performed using the aMDeNM method. This module processes simulation trajectories and generates detailed structural analysis, visualizations, and summary reports.
 
-- **coor-proj.out:** projection of the MD coordinates onto the normal mode space described by the excitation vector;
-- **rms-proj.out:** the system RMSD displacement along the excitation vectors;
-- **vp-proj.out:** projection of the MD velocities onto the normal mode space described by the excitation vector;
-- **ek-proj.out:** displays the additional kinetic energy at each MD step.
+### Structural Properties Calculated
+
+1. **Root Mean Square Deviation (RMSD):**  Measures structural deviation from the initial conformation.
+
+2. **Radius of Gyration (RoG):** Measures the compactness of the protein structure. Useful for identifying folding/unfolding events.
+
+3. **Solvent Accessible Surface Area (SASA):** Calculates the surface area accessible to solvent molecules. Uses the Shrake-Rupley algorithm implemented in Bio.PDB.
+
+4. **Hydrophobic Exposure:** Measures the percentage of hydrophobic residues exposed to solvent. Identifies regions with potential hydrophobic interactions.
+
+5. **Root Mean Square Fluctuation (RMSF):** Calculates per-residue flexibility using Cα atoms. 
+Identifies flexible and rigid regions in the protein structure.
+
+6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
+
+### Analysis Capabilities
+#### Parallel Processing
+The analysis module uses parallel processing to maximize efficiency:
+- Each replica is processed by a separate CPU core
+- Progress is tracked and displayed in the console
+- Results are combined after all replicas are processed
+
+#### Computational Requirements
+- Memory: Depends on system size and number of frames
+- CPU: Uses all available cores by default
+- Storage: Requires space for output files and plots
+
+### Analysis Modes
+#### Standard Analysis
+- Analyzes every frame of the trajectory
+- Provides the highest resolution data
+- More computationally intensive
+
+#### Rough Analysis
+- Analyzes frames at *5ps* intervals
+- Significantly reduces computation time
+- Suitable for quick overviews or large systems
+
+### Configuration Parameters
+The analysis module reads simulation parameters from the `pyAdMD_params.json` file, which includes:
+
+- Number of replicas
+- Total simulation time
+- Atom selection criteria
+- Input file paths
+
+### Output Structure
+#### Directory Organization
+```
+analysis/
+├── analysis_results.csv                # Combined analysis data from all replicas
+├── rmsf.csv                            # Combined RMSF data from all replicas
+├── analysis_summary.html               # HTML summary report
+├── rmsd_plot.png                       # RMSD plot for all replicas
+├── radius_gyration_plot.png            # Radius of gyration plot
+├── sasa_plot.png                       # SASA plot
+├── hydrophobic_exposure_plot.png       # Hydrophobic exposure plot
+├── rmsf_average.png                    # Average RMSF plot
+├── secondary_structure_average.png     # Average secondary structure plot
+└── rep[1-N]/                           # Replica-specific directories
+    ├── analysis_results.csv            # Replica-specific analysis data
+    ├── rmsf.csv                        # Replica-specific RMSF data
+    ├── rmsd_plot.png                   # Replica-specific RMSD plot
+    ├── radius_gyration_plot.png        # Replica-specific RoG plot
+    ├── sasa_plot.png                   # Replica-specific SASA plot
+    ├── hydrophobic_exposure_plot.png   # Replica-specific hydrophobic exposure plot
+    ├── rmsf_plot.png                   # Replica-specific RMSF plot
+    └── secondary_structure.png         # Replica-specific secondary structure plot
+```
+
+### Output Files Description
+1. **CSV Files**
+- **`analysis_results.csv`:** Time-series data for RMSD, RoG, SASA, hydrophobic exposure, and secondary structure content
+- **`rmsf.csv`:** Per-residue RMSF values for all replicas
+
+2. **Plot Files**
+- Individual property plots for each replica
+- Combined plots showing all replicas
+- Average plots across all replicas
+
+3. **HTML Summary**
+- Interactive summary report with tables and embedded plots
+- Statistics for each replica and averages across all replicas
+- Easy navigation and visualization of results
+
+
+Furthermore, some basic analyses are written inside each replica folder at the end of the simulation, they can be found as follows:
+
+- **coor-proj.out:** projection of the MD coordinates onto the normal mode space described by the excitation vector
+- **rms-proj.out:** the system RMSD displacement along the excitation vectors
+- **vp-proj.out:** projection of the MD velocities onto the normal mode space described by the excitation vector
+- **ek-proj.out:** displays the additional kinetic energy at each MD step
 
 [Back to top ↩](#)
 * ****
@@ -276,6 +388,7 @@ Please cite the following paper if you are using any Adaptive MDeNM application 
   - `openmm=8.3.1`
   - `numba=0.61.2`
   - `cupy=13.6.` (optional, for GPU-accelerated ENM calculation. **Note:** CuPy requires matching CUDA toolkit.)
+  - `dssp=4.x` (for secondary structure analysis, refer to the *[DSSP official GitHub repository](https://github.com/PDB-REDO/dssp?tab=readme-ov-file#building)* for building details.)
 
 A `conda` enviroment can be easily setup with the provided `pyAdMD.yaml` file containing the necessary Python dependencies, which are:
 
