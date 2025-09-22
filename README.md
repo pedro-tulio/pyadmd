@@ -53,13 +53,11 @@ This document will give an overview of the aMDeNM method and help to properly se
     - [Using heavy atoms without direction correction (standard MDeNM)](#using-heavy-atoms-without-direction-correction-standard-mdenm)
     - [Restart unfinished pyAdMD simulations](#restart-unfinished-pyadmd-simulations)
     - [Append 100 ps to previously finished pyAdMD simulations](#append-100-ps-to-previously-finished-pyadmd-simulations)
-    - [Roughly analyze pyAdMD simulations](#roughly-analyze-pyadmd-simulations)
+    - [Analyze pyAdMD simulations](#analyze-pyadmd-simulations)
     - [Clean previous setup files](#clean-previous-setup-files)
   - [Analysis](#analysis-1)
-    - [Structural Properties Calculated](#structural-properties-calculated)
-    - [Analysis Capabilities](#analysis-capabilities)
-      - [Parallel Processing](#parallel-processing)
-      - [Computational Requirements](#computational-requirements)
+    - [Basic Structural Properties Calculated](#basic-structural-properties-calculated)
+    - [Computational Features](#computational-features)
     - [Analysis Modes](#analysis-modes)
       - [Standard Analysis](#standard-analysis)
       - [Rough Analysis](#rough-analysis)
@@ -219,7 +217,7 @@ The configuration process is straightforward. Some technical aspects will be cov
 
 ### Analysis
 #### Feature Flags: 
-- **`-r`/`--rough`**: Perform rough analysis (every **`5`** ps instead of every frame)
+- **`-r`/`--rough`**: Perform rough analysis (**optional**. Analyze every **`5`** ps instead of every frame.)
 
 [Back to top ↩](#)
 * ****
@@ -256,7 +254,7 @@ python pyAdMD.py restart
 python pyAdMD.py append -t 100
 ```
 
-### Roughly analyze pyAdMD simulations
+### Analyze pyAdMD simulations
 
 ```
 python pyAdMD.py analyze -r
@@ -274,7 +272,7 @@ python pyAdMD.py clean
 ## Analysis
 The PyAdMD **`analysis`** module provides comprehensive analysis capabilities for molecular dynamics simulations performed using the aMDeNM method. This module processes simulation trajectories and generates detailed structural analysis, visualizations, and summary reports.
 
-### Structural Properties Calculated
+### Basic Structural Properties Calculated
 
 1. **Root Mean Square Deviation (RMSD):**  Measures structural deviation from the initial conformation.
 
@@ -282,30 +280,25 @@ The PyAdMD **`analysis`** module provides comprehensive analysis capabilities fo
 
 3. **Solvent Accessible Surface Area (SASA):** Calculates the surface area accessible to solvent molecules. Uses the Shrake-Rupley algorithm implemented in Bio.PDB.
 
-4. **Hydrophobic Exposure:** Measures the percentage of hydrophobic residues exposed to solvent. Identifies regions with potential hydrophobic interactions.
+4. **Hydrophobic Exposure:** Measures the percentage of hydrophobic residues exposed to solvent. Useful for identifying folding/unfolding events.
 
-5. **Root Mean Square Fluctuation (RMSF):** Calculates per-residue flexibility using Cα atoms. 
-Identifies flexible and rigid regions in the protein structure.
+5. **Root Mean Square Fluctuation (RMSF):** Calculates per-residue flexibility using Cα atoms. Identifies flexible and rigid regions in the protein structure.
 
 6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
 
-### Analysis Capabilities
-#### Parallel Processing
+### Computational Features
 The analysis module uses parallel processing to maximize efficiency:
 - Each replica is processed by a separate CPU core
 - Progress is tracked and displayed in the console
 - Results are combined after all replicas are processed
-
-#### Computational Requirements
 - Memory: Depends on system size and number of frames
 - CPU: Uses all available cores by default
-- Storage: Requires space for output files and plots
 
 ### Analysis Modes
 #### Standard Analysis
 - Analyzes every frame of the trajectory
 - Provides the highest resolution data
-- More computationally intensive
+- May be computationally intensive
 
 #### Rough Analysis
 - Analyzes frames at *5ps* intervals
