@@ -120,7 +120,7 @@ class ConsoleConfig:
     ░░░░░       ░░░░░░
     '''
 
-    VERSION = '1.3'
+    VERSION = '1.4'
     CITATION = '''  Please cite:
 
     \tAdaptive collective motions: a hybrid method to improve
@@ -1260,51 +1260,17 @@ class SimulationRunner:
                 q_proj = np.sum(diff * cntrl_vec)
                 rms_check = np.sqrt((q_proj ** 2) / np.sum(self.sel_mass))
 
-                # Correct the excitation direction if necessary
+                # Correct the excitation direction or recompute ENM modes
                 if rms_check >= self.qrms_correc:
-                    # Compute the average structure of the last excitation
-                    ts = mda.Universe(self.psffile, f"step_{loop - 1}.coor", format="NAMDBIN")
-                    avg_positions = ts.atoms.select_atoms(self.args.selection).positions
-                    ts = mda.Universe(self.psffile, f"step_{loop}.coor", format="NAMDBIN")
-                    avg_positions += ts.atoms.select_atoms(self.args.selection).positions
-                    avg_positions = avg_positions / 2
-                    self.mode_exciter._write_vector(avg_positions, f"average_{loop}.coor", self.sys_pdb)
-
-                    # Open the reference and mobile structures
-                    ref = mda.Universe(self.psffile, ref_str, format="NAMDBIN")
-                    ref = ref.atoms.select_atoms(self.args.selection)
-                    mob = mda.Universe(self.psffile, f"average_{loop}.coor", format="NAMDBIN")
-                    mob = mob.atoms.select_atoms(self.args.selection)
-
-                    # Align the structures and compute the mass-weighted difference
-                    align.alignto(mob, ref, select="protein", weights="mass")
-                    diff = ((mob.positions - ref.positions).T * np.sqrt(self.sel_mass)).T
-
-                    # Normalize the mass-weighted difference vector
-                    diff /= np.linalg.norm(diff)
-
-                    # Project the current coordinates onto Q
-                    dotp = np.sum(diff * cntrl_vec)
-
-                    # Set the average structure as the new reference for the next steps
-                    ref_str = f"average_{loop}.coor"
-
-                    if dotp <= self.cos_alpha:
-                        shutil.copy(f"step_{loop}.coor", f"correc_ref.coor")
-                        self.qrms_correc = 0
-
-                    # Rename the previous excitation vector files
-                    shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
-                    shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
-                    cnt += 1
-
-                    # Write the corrected excitation vector
-                    print(f"{self.console.PGM_NAM}Writing the corrected excitation vector.")
-                    self.mode_exciter._write_vector(diff, "cntrl_vector.vec", self.sys_pdb)
-
-                    # Excite and write the new excited vector
-                    exc_vec = self.mode_exciter.excite(diff, self.energy, self.sel_mass)
-                    self.mode_exciter._write_vector(exc_vec, "excitation.vel", self.sys_pdb)
+                    # If --recalc flag is set, recompute ENM
+                    if hasattr(self.args, 'recalc') and self.args.recalc:
+                        nm_parsed = [int(s) for s in self.args.modes.split(',')]
+                        self._recompute_enm_modes(rep, loop, nm_parsed, cnt)
+                        cnt += 1
+                    else:
+                        # Otherwise, correct the Q vector
+                        self._correct_excitation_direction(loop, ref_str, cntrl_vec, cnt)
+                        cnt += 1
 
                     # Update the rms correction variable value
                     self.qrms_correc += self.globfreq
@@ -1399,6 +1365,151 @@ class SimulationRunner:
             'ref_str': ref_str,
             'qrms_correc': self.qrms_correc
         }
+
+    def _recompute_enm_modes(self, rep, loop, nm_parsed, cnt):
+        """Recompute ENM modes using the current structure with random combination factor."""
+        console = ConsoleConfig()
+        print(f"\n{console.PGM_NAM}Recomputing ENM modes for {console.EXT}Replica {rep}{console.STD} at step {console.EXT}{loop}{console.STD}")
+
+        # Get the Replica directory path for this step
+        rep_dir = os.getcwd()
+
+        # Use current coordinate file as input
+        current_coor = f"step_{loop}.coor"
+
+        # Initialize ENM calculator
+        enm_calculator = ENMCalculator(self.console)
+
+        try:
+            # Compute ENM using current structure
+            enm_calculator.compute_enm(
+                coorfile=current_coor,
+                nm_type=self.args.modeltype.lower(),
+                nm_parsed=nm_parsed,
+                input_dir=rep_dir,  # Output to replica's ENM directory
+                psffile=self.psffile
+            )
+
+            # Generate new combination using RANDOM factors
+            self._generate_new_excitation_vector(rep, loop, nm_parsed, rep_dir, cnt)
+
+            print(f"{console.PGM_NAM}ENM recomputation completed for {console.EXT}Replica {rep}{console.STD}\n")
+
+        except Exception as e:
+            print(f"{console.PGM_ERR}ENM recomputation failed: {console.ERR}{e}{console.STD}")
+            # Fall back to standard correction
+            self._correct_excitation_direction(loop, f"step_{loop-1}.coor", None, cnt)
+
+    def _generate_new_excitation_vector(self, rep, loop, nm_parsed, rep_dir, cnt):
+        """Generate new excitation vector from recomputed ENM modes using random factors."""
+        console = ConsoleConfig()
+
+        # Generate new random factors for this recombination
+        print(f"{console.PGM_NAM}Generating new random factors for ENM recombination")
+        num_modes = len(nm_parsed)
+
+        # Generate random points on N-dimensional hypersphere
+        factors = np.random.normal(size=num_modes)
+        factors = factors / np.linalg.norm(factors)
+
+        # Get base name for coordinate file
+        base_name = os.path.splitext(os.path.basename(f"step_{loop}.coor"))[0]
+
+        # Combine the new modes
+        prefix = "ca" if self.args.modeltype.lower() == 'ca' else "heavy"
+
+        comb_vec = None
+        natom = self.sys_pdb.atoms.select_atoms("protein").n_atoms
+
+        for i, mode_num in enumerate(nm_parsed):
+            # Load the new mode vector
+            mode_file = f"{rep_dir}/{base_name}_enm/{base_name}_{prefix}_mode_{mode_num}.xyz"
+            if os.path.exists(mode_file):
+                mode_universe = mda.Universe(mode_file, format="XYZ")
+                mode_vec = mode_universe.atoms.positions
+
+                if comb_vec is None:
+                    comb_vec = np.zeros((natom, 3))
+
+                # Apply random factor and accumulate
+                comb_vec += mode_vec * factors[i]
+            else:
+                print(f"{console.PGM_WRN}Mode file {mode_file} not found")
+
+        if comb_vec is not None:
+            # Normalize the combined vector
+            comb_vec /= np.linalg.norm(comb_vec)
+
+            # Rename previous excitation vector files
+            if os.path.exists("excitation.vel"):
+                shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
+            if os.path.exists("cntrl_vector.vec"):
+                shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
+
+            # Write the new control vector
+            self.mode_exciter._write_vector(comb_vec, "cntrl_vector.vec", self.sys_pdb)
+
+            # Excite and write the new excited vector
+            exc_vec = self.mode_exciter.excite(comb_vec, self.energy, self.sel_mass)
+            self.mode_exciter._write_vector(exc_vec, "excitation.vel", self.sys_pdb)
+
+            print(f"{console.PGM_NAM}New excitation vector generated from recomputed ENM modes with random factors")
+
+            # Save the factors for reference
+            factors_file = f"{rep_dir}/{base_name}_enm/factors.csv"
+            with open(factors_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Mode', 'Factor'])
+                for mode_num, factor in zip(nm_parsed, factors):
+                    writer.writerow([mode_num, factor])
+            print(f"{console.PGM_NAM}Combination factors saved to {console.EXT}{factors_file}{console.STD}")
+        else:
+            raise ValueError("Could not generate new excitation vector")
+
+    def _correct_excitation_direction(self, loop, ref_str, cntrl_vec, cnt):
+        """Corrects the excitation vector direction."""
+        # Compute the average structure of the last excitation
+        ts = mda.Universe(self.psffile, f"step_{loop - 1}.coor", format="NAMDBIN")
+        avg_positions = ts.atoms.select_atoms(self.args.selection).positions
+        ts = mda.Universe(self.psffile, f"step_{loop}.coor", format="NAMDBIN")
+        avg_positions += ts.atoms.select_atoms(self.args.selection).positions
+        avg_positions = avg_positions / 2
+        self.mode_exciter._write_vector(avg_positions, f"average_{loop}.coor", self.sys_pdb)
+
+        # Open the reference and mobile structures
+        ref = mda.Universe(self.psffile, ref_str, format="NAMDBIN")
+        ref = ref.atoms.select_atoms(self.args.selection)
+        mob = mda.Universe(self.psffile, f"average_{loop}.coor", format="NAMDBIN")
+        mob = mob.atoms.select_atoms(self.args.selection)
+
+        # Align the structures and compute the mass-weighted difference
+        align.alignto(mob, ref, select="protein", weights="mass")
+        diff = ((mob.positions - ref.positions).T * np.sqrt(self.sel_mass)).T
+
+        # Normalize the mass-weighted difference vector
+        diff /= np.linalg.norm(diff)
+
+        # Project the current coordinates onto Q
+        dotp = np.sum(diff * cntrl_vec)
+
+        # Set the average structure as the new reference for the next steps
+        ref_str = f"average_{loop}.coor"
+
+        if dotp <= self.cos_alpha:
+            shutil.copy(f"step_{loop}.coor", f"correc_ref.coor")
+            self.qrms_correc = 0
+
+        # Rename the previous excitation vector files
+        shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
+        shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
+
+        # Write the corrected excitation vector
+        print(f"{self.console.PGM_NAM}Writing the corrected excitation vector.")
+        self.mode_exciter._write_vector(diff, "cntrl_vector.vec", self.sys_pdb)
+
+        # Excite and write the new excited vector
+        exc_vec = self.mode_exciter.excite(diff, self.energy, self.sel_mass)
+        self.mode_exciter._write_vector(exc_vec, "excitation.vel", self.sys_pdb)
 
 
 class Analyzer:
@@ -2491,7 +2602,7 @@ def parse_arguments():
     subparsers = parser.add_subparsers(dest='option', help='Available commands')
 
     # RUN subparser
-    opt_run = subparsers.add_parser('run', help="Setup and run simulations.")
+    opt_run = subparsers.add_parser('run', help="Setup and run simulations")
 
     # Required arguments for run
     run_required = opt_run.add_argument_group('Required arguments')
@@ -2532,22 +2643,24 @@ def parse_arguments():
                           help='Compute standard MDeNM calculations')
     run_flags.add_argument('-f', '--fixed', action='store_true',
                           help='Disable excitation vector correction and keep constant excitation energy injections')
+    run_flags.add_argument('-r', '--recalc', action='store_true',
+                          help='Recompute ENM modes instead of correcting excitation direction when needed')
 
     # RESTART subparser
-    subparsers.add_parser('restart', help="Restart unfinished simulations.")
+    subparsers.add_parser('restart', help="Restart unfinished simulations")
 
     # APPEND subparser
-    opt_apnd = subparsers.add_parser('append', help="Extend previously computed simulations.")
+    opt_apnd = subparsers.add_parser('append', help="Extend previously computed simulations")
     opt_apnd.add_argument('-t', '--time', action="store", type=int, required=True, default=100,
                          help="Simulation time to append (default: 100ps)")
 
     # ANALYSIS subparser
-    opt_analyze = subparsers.add_parser('analyze', help="Analyze simulation results and generate plots.")
+    opt_analyze = subparsers.add_parser('analyze', help="Analyze simulation results and generate plots")
     opt_analyze.add_argument('-r', '--rough', action='store_true',
                             help='Perform rough analysis (every 5ps instead of every frame)')
 
     # CLEAN subparser
-    subparsers.add_parser('clean', help="Erase all previous simulation files.")
+    subparsers.add_parser('clean', help="Erase all previous simulation files")
 
     # Parse arguments
     args = parser.parse_args()
@@ -2568,6 +2681,10 @@ def parse_arguments():
     if hasattr(args, 'option') and args.option == 'run':
         if args.modeltype == 'CHARMM' and not args.modefile:
             opt_run.error("The -mod/--modefile argument is required when -type/--type is CHARMM")
+
+    if hasattr(args, 'option') and args.option == 'run':
+        if args.modeltype == 'CHARMM' and args.recalc:
+            opt_run.error("ENM recalculation is not compatible with CHARMM normal modes")
 
     return args
 
@@ -2969,7 +3086,7 @@ def main():
         strfile = f"{input_dir}/{args_dict.strfile.split('/')[-1]}"
 
         # Get parameters from loaded args
-        nm_type = args_dict.type.lower()
+        nm_type = args_dict.modeltype.lower()
         energy = args_dict.energy
         selection = args_dict.selection
         replicas = args_dict.replicas
