@@ -364,6 +364,7 @@ python pyAdMD.py clean
 * ****
 
 # Dependencies
+A `conda` enviroment can be easily setup with the provided `pyAdMD.yaml` file containing the necessary Python dependencies, which are:
 
   - `python=3.12`
   - `numpy=2.2.5`
@@ -375,8 +376,7 @@ python pyAdMD.py clean
   - `cupy=13.6.` (optional, for GPU-accelerated ENM calculation. **Note:** CuPy requires matching CUDA toolkit.)
   - `dssp=4.x` (for secondary structure analysis, refer to the *[DSSP official GitHub repository](https://github.com/PDB-REDO/dssp?tab=readme-ov-file#building)* for building details.)
 
-A `conda` enviroment can be easily setup with the provided `pyAdMD.yaml` file containing the necessary Python dependencies, which are:
-
+Type the following command to create the environment:
 ```  
 conda env create -f pyAdMD.yaml
 ```
