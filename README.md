@@ -53,7 +53,6 @@ This document will give an overview of the aMDeNM method and help to properly se
     - [Feature Flags](#feature-flags-1)
 - [Analysis](#analysis-1)
   - [Basic Structural Properties Calculated](#basic-structural-properties-calculated)
-  - [Computational Features](#computational-features)
   - [Analysis Modes](#analysis-modes)
     - [Standard Analysis](#standard-analysis)
     - [Rough Analysis](#rough-analysis)
