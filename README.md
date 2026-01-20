@@ -90,13 +90,13 @@ If using CHARMM-based normal modes, it is also necessary to compute the modes fr
 The program computes Cα or heavy atoms Elastic Network Model using the same algorithms as the software available at our *[ENM github repository](https://github.com/pedro-tulio/enm)*.
 
 ## Uniform Normal Modes Combination
-The program generates uniformly distributed points on N-dimensional hypersphere through a repulsion-based algorithm which employs a physics-inspired approach where points behave as charged particles confined to the spherical manifold, interacting through a dimensionally-scaled potential function. The generated points are then used as scaling factors to be used in normal modes combinations. The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* was built to the same purpose. Here we present a different design with a faster and more simplified implementation.
+The program generates uniformly distributed points on N-dimensional hypersphere through a repulsion-based algorithm which employs a physics-inspired approach where points behave as charged particles confined to the spherical manifold, interacting through a dimensionally-scaled potential function. The generated points are then used as scaling factors to be used in normal modes combinations. The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* was firstly built to the same purpose. Here, we present a different design with a faster and concise implementation.
 
 ### Problem Definition
 Given an N-dimensional hypersphere $S^{N-1} = \{x \in R^{N}:||x|| = 1\}$ and an integer $P \gt 0$, we seek to generate $P$ points ${x_1 , x_2, \dots, x_P}$ on $S^{N-1}$ that maximize the minimal pairwise distance: $min_{dist} ||xi-xj||$ for $i \neq j$. This corresponds to finding an optimal spherical code with minimal angular separation.
 
 ### Energy Minimization Framework
-The algorithm reformulates the geometric optimization as an energy minimization problem with a repulsive potential function $U(r)$ between points:
+The algorithm considers the geometric optimization as an energy minimization problem, modeling it as a repulsive potential function $U(r)$ between points:
 
 $$
 E = \sum_{i=1}^{P}  \sum_{j=1}^{P} U(||x_i-x_j||) ~~~ \text{for} ~~~ i \neq j
@@ -152,7 +152,7 @@ At the end of each replica, a de-excitation molecular dynamics is submited in or
 * ****
 
 # pyAdMD Applications
-The Adaptive MDeNM method takes Cα-only or heavy atoms ENM modes or CHARMM normal modes as collective variables to improve Molecular Dynamics sampling.
+The Adaptive MDeNM method takes self-computed Cα or heavy atoms ENM modes or CHARMM-computed normal modes as collective variables to improve Molecular Dynamics sampling.
 
 ## ENM
 Uses simpified force-field based on particles and springs computed automatically by the program. A given normal mode (or a linear combination of several modes) is used to excite the system during the molecular dyamics simulation.
@@ -251,14 +251,6 @@ The PyAdMD **`analysis`** module provides comprehensive analysis capabilities fo
 
 6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
 
-## Computational Features
-The analysis module uses parallel processing to maximize efficiency:
-- Each replica is processed by a separate CPU core
-- Progress is tracked and displayed in the console
-- Results are combined after all replicas are processed
-- Memory: Depends on system size and number of frames
-- CPU: Uses all available cores by default
-
 ## Analysis Modes
 ### Standard Analysis
 - Analyzes every frame of the trajectory
@@ -329,7 +321,7 @@ Furthermore, some basic analyses are written inside each replica folder at the e
 * ****
 
 # Usage Examples
-T4-lysozyme example files are available at the **`tutorial`** folder. We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
+Example files are available at the **`tutorial`** folder (T4-lysozyme). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
 
 ## Using CHARMM normal modes
 ```
