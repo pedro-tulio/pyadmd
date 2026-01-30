@@ -406,19 +406,15 @@ class ENMCalculator:
         cutoff_nm = cutoff * 0.1    # Convert Å to nm
         min_distance_nm = 2.9 * 0.1 # Minimum distance in nm (2.9 Å)
 
-        bonds = []
-        for i in range(n_atoms):
-            for j in range(i+1, n_atoms):
-                dist = dist_matrix[i, j]
-                # Apply both minimum distance and cutoff
-                if min_distance_nm <= dist <= cutoff_nm:
-                    bonds.append((i, j, dist))
-
-        for i, j, dist in bonds:
-            enm_force.addBond(i, j, [dist])
+        i_idx, j_idx = np.triu_indices(n_atoms, k=1)
+        dists = dist_matrix[i_idx, j_idx]
+        mask = (dists >= min_distance_nm) & (dists <= cutoff_nm)
+        n_bonds = int(mask.sum())
+        for i, j, dist in zip(i_idx[mask], j_idx[mask], dists[mask]):
+            enm_force.addBond(int(i), int(j), [float(dist)])
 
         system.addForce(enm_force)
-        print(f"{self.console.PGM_NAM}Added {self.console.EXT}{len(bonds)}{self.console.STD} ENM bonds with cutoff={self.console.EXT}{cutoff}{self.console.STD} Å, "
+        print(f"{self.console.PGM_NAM}Added {self.console.EXT}{n_bonds}{self.console.STD} ENM bonds with cutoff={self.console.EXT}{cutoff}{self.console.STD} Å, "
               f"min_distance={self.console.EXT}2.9{self.console.STD} Å, k={self.console.EXT}{spring_constant}{self.console.STD} kcal/mol/Å².")
         system.addForce(mm.CMMotionRemover())
 
@@ -496,20 +492,15 @@ class ENMCalculator:
         cutoff_nm = cutoff * 0.1    # Convert Å to nm
         min_distance_nm = 2.0 * 0.1 # Minimum distance in nm (2.0 Å)
 
-        # Add bonds within cutoff range
-        bonds = []
-        for i in range(n_atoms):
-            for j in range(i+1, n_atoms):
-                dist = dist_matrix[i, j]
-                # Apply both minimum distance and cutoff
-                if min_distance_nm <= dist <= cutoff_nm:
-                    bonds.append((i, j, dist))
-
-        for i, j, dist in bonds:
-            enm_force.addBond(i, j, [dist])
+        i_idx, j_idx = np.triu_indices(n_atoms, k=1)
+        dists = dist_matrix[i_idx, j_idx]
+        mask = (dists >= min_distance_nm) & (dists <= cutoff_nm)
+        n_bonds = int(mask.sum())
+        for i, j, dist in zip(i_idx[mask], j_idx[mask], dists[mask]):
+            enm_force.addBond(int(i), int(j), [float(dist)])
 
         system.addForce(enm_force)
-        print(f"{self.console.PGM_NAM}Added {self.console.EXT}{len(bonds)}{self.console.STD} ENM bonds with cutoff={self.console.EXT}{cutoff}{self.console.STD} Å, "
+        print(f"{self.console.PGM_NAM}Added {self.console.EXT}{n_bonds}{self.console.STD} ENM bonds with cutoff={self.console.EXT}{cutoff}{self.console.STD} Å, "
               f"min_distance={self.console.EXT}2.0{self.console.STD} Å, k={self.console.EXT}{spring_constant}{self.console.STD} kcal/mol/Å².")
         system.addForce(mm.CMMotionRemover())
 
@@ -530,16 +521,7 @@ class ENMCalculator:
         """
         with open(pdb_file, 'r') as f:
             lines = f.readlines()
-
-        new_lines = []
-        for line in lines:
-            if line.startswith('HETATM'):
-                # Replace HETATM with ATOM while preserving spacing
-                new_line = 'ATOM  ' + line[6:]
-                new_lines.append(new_line)
-            else:
-                new_lines.append(line)
-
+        new_lines = ['ATOM  ' + line[6:] if line.startswith('HETATM') else line for line in lines]
         with open(pdb_file, 'w') as f:
             f.writelines(new_lines)
 
@@ -787,36 +769,21 @@ class ENMCalculator:
         pdb = app.PDBFile(pdb_file)
         n_original_atoms = pdb.topology.getNumAtoms()
 
-        # Get element symbols and atom names from original topology
+        # Build element list and (residue.index, atom.name) -> orig_idx lookup in one pass
         elements = []
-        atom_names = []
-        for atom in pdb.topology.atoms():
+        orig_lookup = {}
+        for orig_idx, atom in enumerate(pdb.topology.atoms()):
             elements.append(atom.element.symbol)
-            atom_names.append(atom.name)
+            key = (atom.residue.index, atom.name)
+            orig_lookup[key] = orig_idx
 
         n_particles = system.getNumParticles()
 
-        # Create a mapping from ENM atoms to original atoms
+        # Map ENM atoms to original indices via O(1) lookup
         enm_to_original_map = []
-
-        if model_type == 'ca':
-            # For Cα model, map Cα atoms to their positions in the original structure
-            for atom_idx, atom in enumerate(topology.atoms()):
-                # Find the corresponding atom in the original structure
-                for orig_idx, orig_atom in enumerate(pdb.topology.atoms()):
-                    if (orig_atom.name == 'CA' and
-                        orig_atom.residue.index == atom.residue.index):
-                        enm_to_original_map.append(orig_idx)
-                        break
-        else:
-            # For heavy atom model, map heavy atoms to their positions in the original structure
-            for atom_idx, atom in enumerate(topology.atoms()):
-                # Find the corresponding atom in the original structure
-                for orig_idx, orig_atom in enumerate(pdb.topology.atoms()):
-                    if (orig_atom.name == atom.name and
-                        orig_atom.residue.index == atom.residue.index):
-                        enm_to_original_map.append(orig_idx)
-                        break
+        for atom in topology.atoms():
+            key = (atom.residue.index, 'CA' if model_type == 'ca' else atom.name)
+            enm_to_original_map.append(orig_lookup[key])
 
         # Write each mode to a separate XYZ file
         freq = frequencies[nm] * 108.58  # Convert to cm⁻¹
@@ -830,12 +797,9 @@ class ENMCalculator:
             # Extract and reshape the mode vector for ENM atoms
             mode_vector = modes[:, nm].reshape(n_particles, 3)
 
-            # Create a full vector for all atoms, initialized to zero
+            # Create full vector and map ENM mode vectors via advanced indexing
             full_vector = np.zeros((n_original_atoms, 3))
-
-            # Map ENM mode vectors to the correct positions in the full vector
-            for enm_idx, orig_idx in enumerate(enm_to_original_map):
-                full_vector[orig_idx] = mode_vector[enm_idx]
+            full_vector[enm_to_original_map] = mode_vector
 
             # Write coordinates for each atom
             for i in range(n_original_atoms):
@@ -934,15 +898,9 @@ class ModeExciter:
                 prev_max_force = current_max_force
 
                 # Move points according to forces (in the tangent plane)
-                for i in range(P):
-                    # Project force onto tangent plane
-                    tangent_force = total_force[i] - np.dot(total_force[i], factors[i]) * factors[i]
-
-                    # Move point in tangent direction
-                    factors[i] += 0.001 * tangent_force
-
-                    # Project back to hypersphere
-                    factors[i] /= np.linalg.norm(factors[i])
+                tangent_force = total_force - np.sum(total_force * factors, axis=1, keepdims=True) * factors
+                factors += 0.001 * tangent_force
+                factors /= np.linalg.norm(factors, axis=1, keepdims=True)
 
                 # Check for convergence or stagnation
                 if current_max_force < 1e-6:
@@ -966,15 +924,8 @@ class ModeExciter:
             nm_parsed (list): List of mode numbers used in combinations.
             cwd (str): Current working directory path.
         """
-        # Create the header
         header = ['Combination'] + [f'Mode {mode}' for mode in nm_parsed]
-        # Create the data rows
-        rows = []
-        for i in range(len(factors)):
-            row = [str(i + 1)]
-            for val in factors[i]:
-                row.append(str(val))
-            rows.append(row)
+        rows = [[str(i + 1)] + [str(v) for v in factors[i]] for i in range(len(factors))]
 
         # Create output folder
         output_folder = f"{cwd}/rep-struct-list"
@@ -1002,29 +953,25 @@ class ModeExciter:
             cwd (str): Current working directory path.
             mda_U (mda.Universe): MDAnalysis Universe containing system structure.
         """
-        # Set output folder
         output_folder = f"{cwd}/rep-struct-list"
+        natom = mda_U.atoms.select_atoms("protein").n_atoms
+
+        # Load all mode vectors once (same for all replicas)
+        mode_vectors = []
+        if nm_type == 'charmm':
+            for mode_num in modes:
+                nm = mda.Universe(f"{cwd}/inputs/mode_nm{mode_num}.crd", format="CRD")
+                mode_vectors.append(nm.atoms.positions.copy())
+        else:
+            base_name = os.path.splitext(os.path.basename(coorfile))[0]
+            for mode_num in modes:
+                nm = mda.Universe(f"{cwd}/inputs/{base_name}_enm/{base_name}_{nm_type}_mode_{mode_num}.xyz", format="XYZ")
+                mode_vectors.append(nm.atoms.positions.copy())
 
         for rep in range(replicas):
-            # Create an empty vector to store the combination
-            natom = mda_U.atoms.select_atoms("protein").n_atoms
             comb_vec = np.zeros((natom, 3))
-
             for nm_idx in range(len(modes)):
-                if nm_type == 'charmm':
-                    nm = mda.Universe(f"{cwd}/inputs/mode_nm{modes[nm_idx]}.crd", format="CRD")
-                else:
-                    base_name = os.path.splitext(os.path.basename(coorfile))[0]
-                    nm = mda.Universe(f"{cwd}/inputs/{base_name}_enm/{base_name}_{nm_type}_mode_{modes[nm_idx]}.xyz", format="XYZ")
-                nm = nm.atoms.positions
-
-                # Apply the factors to the modes
-                comb = (nm.T * factors[rep, nm_idx]).T
-
-                # Accumulate modes to obtain a new combined vector
-                comb_vec = np.add(comb, comb_vec)
-
-            # Normalize and write the combined vector
+                comb_vec += factors[rep, nm_idx] * mode_vectors[nm_idx]
             comb_vec /= np.linalg.norm(comb_vec)
             self._write_vector(comb_vec, f"{output_folder}/rep{rep+1}_vector.vec", mda_U)
 
@@ -1241,7 +1188,7 @@ class SimulationRunner:
             run_namd(namd_conf, self.psffile, self.pdbfile, self.strfile, loop)
 
             # EVALUATE IF IT IS NECESSARY TO CHANGE THE EXCITATION DIRECTION
-            if [self.args.no_correc == False] and [self.args.fixed == False]:
+            if not self.args.no_correc and not self.args.fixed:
                 coor_ref = mda.Universe(self.psffile, "correc_ref.coor", format="NAMDBIN")
                 coor_ref = coor_ref.atoms.select_atoms(self.args.selection).positions
 
