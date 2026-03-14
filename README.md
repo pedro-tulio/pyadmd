@@ -27,8 +27,12 @@ This document will give an overview of the aMDeNM method and help to properly se
   - [ENM Computation](#enm-computation)
   - [Uniform Normal Modes Combination](#uniform-normal-modes-combination)
     - [Problem Definition](#problem-definition)
+    - [Mode Subspace Geometry](#mode-subspace-geometry)
+    - [Orthonormal Basis Construction](#orthonormal-basis-construction)
     - [Energy Minimization Framework](#energy-minimization-framework)
     - [Dimensionally-Scaled Potential Function](#dimensionally-scaled-potential-function)
+    - [Gradient Flow on the Sphere](#gradient-flow-on-the-sphere)
+    - [Special Case: Cross-Polytope Initialization](#special-case-cross-polytope-initialization)
     - [Normal Modes Linear Combination](#normal-modes-linear-combination)
   - [Kinetic Energy Control](#kinetic-energy-control)
   - [Excitation Direction Update](#excitation-direction-update)
@@ -89,60 +93,167 @@ If using CHARMM-based normal modes, it is also necessary to compute the modes fr
 The program computes Cα or heavy atoms Elastic Network Model using the same algorithms as the software available at our *[ENM github repository](https://github.com/pedro-tulio/enm)*.
 
 ## Uniform Normal Modes Combination
-The program generates uniformly distributed points on N-dimensional hypersphere through a repulsion-based algorithm which employs a physics-inspired approach where points behave as charged particles confined to the spherical manifold, interacting through a dimensionally-scaled potential function. The generated points are then used as scaling factors to be used in normal modes combinations. The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* was firstly built to the same purpose. Here, we present a different design with a faster and concise implementation.
+
+The program generates uniformly distributed excitation vectors through a geometry-aware repulsion-based algorithm. The approach builds on a physics-inspired framework where points behave as charged particles confined to a spherical manifold, interacting through a dimensionally-scaled potential function. Unlike naive implementations that operate in an abstract factor space, the algorithm here accounts for the true geometry of the normal mode subspace before distributing the points, guaranteeing that the resulting excitation vectors are genuinely equidistant in the physical Cartesian space that governs the molecular dynamics. The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* was the first implementation built for the same purpose; the design presented here extends that concept with a geometry-corrected basis and a faster, more concise implementation.
 
 ### Problem Definition
-Given an N-dimensional hypersphere $S^{N-1} = \{x \in R^{N}:||x|| = 1\}$ and an integer $P \gt 0$, we seek to generate $P$ points ${x_1 , x_2, \dots, x_P}$ on $S^{N-1}$ that maximize the minimal pairwise distance: $min_{dist} ||xi-xj||$ for $i \neq j$. This corresponds to finding an optimal spherical code with minimal angular separation.
 
-### Energy Minimization Framework
-The algorithm considers the geometric optimization as an energy minimization problem, modeling it as a repulsive potential function $U(r)$ between points:
+Let $`\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N \in \mathbb{R}^{3n}`$ be the $N$ normal mode vectors selected for excitation, where $n$ is the number of selected atoms. Each $`\mathbf{v}_k`$ is a flattened Cartesian displacement vector of length $3n$. The set of all normalized linear combinations of these vectors defines an $N$-dimensional subspace of $`\mathbb{R}^{3n}`$:
 
 $$
-E = \sum_{i=1}^{P}  \sum_{j=1}^{P} U(||x_i-x_j||) ~~~ \text{for} ~~~ i \neq j
+\mathcal{V} = \mathrm{span}\{\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N\}
+$$
+
+Given an integer $P>0$, we seek to generate $P$ unit vectors $`\{\mathbf{q}_1, \mathbf{q}_2, \dots, \mathbf{q}_P\} \subset \mathcal{V}`$ that maximize the minimal pairwise angular separation:
+
+$$
+\max_{{\mathbf{q}_i}} \min_{i \neq j} \|\mathbf{q}_i - \mathbf{q}_j\|
+$$
+
+This corresponds to finding an optimal spherical code on the unit hypersphere $S^{N-1}$ embedded within $\mathcal{V}$, with minimal angular separation between any two excitation directions.
+
+### Mode Subspace Geometry
+
+A naive approach would place the $N$ modes on coordinate axes and treat the combination coefficients $c_k$ directly as coordinates on $S^{N-1}$. This is geometrically valid only if the mode vectors satisfy $`\langle \mathbf{v}_i, \mathbf{v}_j \rangle = \delta_{ij}`$, i.e., they are orthonormal in plain Cartesian space. In practice this condition is not met. ENM mode vectors are orthogonal in the mass-weighted inner product but carry non-uniform amplitudes in Cartesian coordinates, with low-frequency modes typically exhibiting larger displacements than high-frequency ones. CHARMM normal modes may additionally lose orthogonality when projected onto an atomic subset. As a consequence, equal angular spacing of coefficient vectors in abstract factor space does not translate into equal angular spacing of the physical excitation vectors $\mathbf{q}_i$.
+
+To correct for this, the algorithm explicitly constructs an orthonormal basis
+for $\mathcal{V}$ using QR decomposition before running the repulsion algorithm.
+
+### Orthonormal Basis Construction
+
+Assemble the mode matrix $`\mathbf{M}_{\mathrm{nm}} \in \mathbb{R}^{N \times 3n}`$ whose rows are the flattened mode vectors:
+
+$$
+\mathbf{M}_{\mathrm{nm}} =
+\begin{pmatrix}
+— & \mathbf{v}_1^\top & — \\
+& \vdots & \\
+— & \mathbf{v}_N^\top & —
+\end{pmatrix}
+$$
+
+Apply QR decomposition to $\mathbf{M}_{\mathrm{nm}}^\top \in \mathbb{R}^{3n \times N}$:
+
+$$
+\mathbf{M}_{\mathrm{nm}}^\top = \mathbf{Q}_{\mathrm{qr}}\ \mathbf{R}
+$$
+
+where $`\mathbf{Q}_{\mathrm{qr}} \in \mathbb{R}^{3n \times N}`$ has orthonormal columns and $`\mathbf{R} \in \mathbb{R}^{N \times N}`$ is upper triangular. Setting $`\mathbf{Q} = \mathbf{Q}_{\mathrm{qr}}^\top \in \mathbb{R}^{N \times 3n}`$ yields an orthonormal row basis for $\mathcal{V}$:
+
+$$
+\langle \mathbf{Q}_{i,:}, \mathbf{Q}_{j,:} \rangle = \delta_{ij}
+$$
+
+A point $`\mathbf{x} \in \mathbb{R}^N`$ on the unit hypersphere $S^{N-1}$ maps to a unit physical vector via $`\mathbf{q} = \mathbf{x}\mathbf{Q} \in \mathbb{R}^{3n}`$, and because $\mathbf{Q}$ is an isometric embedding, inner products are preserved:
+
+$$
+\langle \mathbf{x}_i \mathbf{Q}, \mathbf{x}_j \mathbf{Q} \rangle = \langle \mathbf{x}_i, \mathbf{x}_j \rangle
+$$
+
+The repulsion algorithm therefore operates on $N$-dimensional coordinates $`\mathbf{x} \in \mathbb{R}^N`$ whose geometry is faithful to the physical mode subspace, at no additional cost relative to working in abstract factor space.
+
+### Energy Minimization Framework
+
+The distribution problem is cast as an energy minimization over $P$ points $`\{\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_P\} \subset S^{N-1}`$:
+
+$$
+E = \sum_{i=1}^{P} \sum_{\substack{j=1 \\ j \neq i}}^{P} U \left(\|\mathbf{x}_i - \mathbf{x}_j\|\right)
 $$
 
 ### Dimensionally-Scaled Potential Function
-The implementation uses an inverse power law potential scaled with dimensionality: $U(r) = 1/r^k$ where $k = N-1$. This dimensional scaling accounts for:
-1. **Harmonic Properties:** In N dimensions, the fundamental solution to Laplace's equation scales as $1/r^{N-2}$.
-2. **Volume Scaling:** The surface area of an N-dimensional hypersphere scales approximately as $({2 \pi e}/N)^{N/2}$, requiring stronger repulsion in higher dimensions to overcome concentration of measure phenomena.
-3. **Computational Stability:** The exponent ensures numerical stability by preventing excessively large or small force values in high dimensions
 
-### Normal Modes Linear Combination 
-The generated points are then used as scalar factors that multiply each normal mode vector used in the linear combination that makes up the excitation direction vector $\textbf{Q}$.
+The repulsive potential uses an inverse power law scaled by the dimensionality of the space:
+
+$$
+U(r) = \frac{1}{r^{k}}, \quad k = N - 1
+$$
+
+The exponent $k = N-1$ is chosen for three reasons. First, the fundamental solution to Laplace's equation in $N$ dimensions scales as $1/r^{N-2}$, and the gradient of that solution scales as $1/r^{N-1}$, making this the natural repulsive force law in $N$-dimensional space. Second, the surface area of $S^{N-1}$ grows as $`({2\pi e}/{N})^{N/2}`$, so stronger repulsion in higher dimensions is required to counteract the concentration-of-measure effect that causes random points to cluster near the equator. Third, the exponent ensures numerical stability by preventing excessively large or small force values as $N$ varies.
+
+### Gradient Flow on the Sphere
+
+The repulsive force on point $\mathbf{x}_i$ arising from all other points is:
+
+$$
+\mathbf{f}_i = \sum_{\substack{j=1 \\ j \neq i}}^{P}
+\frac{\mathbf{x}_i - \mathbf{x}_j}{\|\mathbf{x}_i - \mathbf{x}_j\|^{N+1}}
+$$
+
+Since the points must remain on $S^{N-1}$, the gradient is projected onto the tangent plane at $\mathbf{x}_i$ to eliminate any radial component:
+
+$$
+\tilde{\mathbf{f}}_i = \mathbf{f}_i - \left(\mathbf{f}_i \cdot \mathbf{x}_i\right) \mathbf{x}_i
+$$
+
+Each iteration updates the points by a fixed step $\eta = 0.001$ along their
+tangent-plane forces and then renormalizes back onto $S^{N-1}$:
+
+$$
+\mathbf{x}_i \leftarrow \frac{\mathbf{x}_i + \eta\,\tilde{\mathbf{f}}_i}
+{\|\mathbf{x}_i + \eta\,\tilde{\mathbf{f}}_i\|}
+$$
+
+Convergence is declared when $`\max_i \|\mathbf{f}_i\|_\infty < 10^{-6}`$, and the iteration is terminated early when the maximum force changes by less than $10^{-7}$ over five consecutive iterations (stagnation criterion).
+
+### Special Case: Cross-Polytope Initialization
+
+When $P=2N$, the $2N$ vertices of the cross-polytope:
+
+$$
+\{\pm\mathbf{e}_1, \pm\mathbf{e}_2, \dots, \pm\mathbf{e}_N\}
+$$
+
+provide an analytically optimal initialization in $\mathbf{Q}$-coordinates and the repulsion loop is skipped. These vertices are already maximally separated on $S^{N-1}$ under the symmetry of the cross-polytope, yielding pairwise angular separations of either $90°$ or $180°$.
+
+### Normal Modes Linear Combination
+
+Once the coordinates $`\{\mathbf{x}_1, \dots, \mathbf{x}_P\}`$ have converged on $S^{N-1}$, each is mapped back to a physical excitation vector via the orthonormal basis $\mathbf{Q}$:
+
+$$
+\mathbf{q}_i = \mathbf{x}_i \mathbf{Q} \in \mathbb{R}^{3n}, \qquad \|\mathbf{q}_i\| = 1
+$$
+
+The equivalent scalar combination factors $\{c_{i,k}\}$ in terms of the original (non-orthonormal) mode vectors — useful for logging and interpretability — are recovered by least-squares projection:
+
+$$
+\mathbf{c}_i = \mathbf{q}_i \, \mathbf{M}_{\mathrm{nm}}^+ \in \mathbb{R}^N
+$$
+
+where $`\mathbf{M}_{\mathrm{nm}}^+`$ denotes the Moore–Penrose pseudoinverse of $`\mathbf{M}_{\mathrm{nm}}`$. These approximate coefficients are written to the `factors.csv` output file for reference but do not influence the simulation; the physical vectors $\mathbf{q}_i$ are used directly as excitation directions.
 
 ## Kinetic Energy Control
-The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $\textbf{Q}$ direction is calculated by projecting first the current velocities to the excitation direction $\textbf{Q}$ as $\textbf V_p = (\textbf V_{curr} \textbf{Q}) \textbf{Q}$, where $\textbf V_{p}$ and $\textbf{V}_{curr}$ the 3N-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
+The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $\mathbf{Q}$ direction is calculated by projecting first the current velocities to the excitation direction $\mathbf{Q}$ as $`\mathbf{V}_p = (\mathbf{V}_{curr} \cdot \mathbf{Q}) \cdot \mathbf{Q}`$, where $`\mathbf{V}_{p}`$ and $`\mathbf{V}_{curr}`$ the $3N$-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
 
 $$
-E_k = \frac{1}{2} \textbf{V}_{p}^T \textbf{M} \textbf{V}_p
+E_k = \frac{1}{2} \mathbf{V}_{p}^T \mathbf{M}\ \mathbf{V}_p
 $$
 
-where $\textbf{M}$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $\textbf V_{new} = \textbf V_{curr} + (\textbf V_{exc} - \textbf V_{p})$.
+where $\mathbf{M}$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $`\mathbf{V}_{new} = \mathbf{V}_{curr} + (\mathbf{V}_{exc} - \mathbf{V}_{p})`$.
 
 With this procedure, the system is kept in a continuous excited state, allowing an effective small, "adiabatic-like" energy injection. The energy injection control is done by projecting the velocities computed during the simulation onto the excited vector, thus obtaining and rescaling the kinetic energy corresponding to it.
 
 ## Excitation Direction Update
 Since the excitation vector is obtained from the initial conformation, it is dependent of this configuration. As the system is displaced along this direction and change its conformation, the motion loses its directionality due to mainly anharmonic effects. To prevent the structural distortions produced by the displacement along a vector that is no longer valid, the program update the excitation directions based on the trajectory evolution during the previous excitation steps. This procedure allows the system to adaptively find a relaxed path to follow during the next aMDeNM excitations.
 
-If we consider the *n<sup>th</sup>* simulation, the next excitation vector, $\textbf Q_{n+1}$, is determined based on specific parameter values obtained along the trajectory followed in the $\textbf Q_n$ direction. A new excitation vector is defined based on two parameters: the first relates to the effective displacement $\ell$ along $\textbf Q_n$ during the *n<sup>th</sup>* excited dynamics by projecting the mass-weighted effective displacement vector $\textbf d_n = \textbf M^{1/2} ({\langle \textbf r \rangle}_n - \textbf r_n^0)$ onto the normalized mass-weighted excitation vector $\textbf Q_n$, where the ${\langle \textbf r \rangle}_n$ is the average position of the structures over the last 0.1 ps obtained in the *n<sup>th</sup>* excitation, and $\textbf r_n^0$ is the starting position for the following simulation.
+If we consider the $n^{th}$ simulation, the next excitation vector, $\mathbf{Q}_{n+1}$, is determined based on specific parameter values obtained along the trajectory followed in the $\mathbf{Q}_n$ direction. A new excitation vector is defined based on two parameters: the first relates to the effective displacement $\ell$ along $\mathbf{Q}_n$ during the $n^{th}$ excited dynamics by projecting the mass-weighted effective displacement vector $`\mathbf{d}_n = \mathbf{M}^{1/2} ({\langle \mathbf{r} \rangle}_n - \mathbf{r}_n^0)`$ onto the normalized mass-weighted excitation vector $\mathbf{Q}_n$, where the ${\langle \mathbf{r} \rangle}_n$ is the average position of the structures over the last $0.2 ps$ obtained in the $n^{th}$ excitation, and $\mathbf{r}_n^0$ is the starting position for the following simulation.
 
-The second parameter relates to the relative deviation of the vector $\textbf d_n$ with respect to vector $\textbf Q_n$, evaluated by the angle $\alpha_n$ between them. More precisely, we consider the $\cos {\alpha}_n$ obtained by taking the scalar product of these vectors after normalizing $\textbf d_n$, as following:
-
-$$
-\cos {\alpha}_n = \frac {\textbf d_n \textbf Q_n}{||\textbf d_n||}
-$$
-
-A precise rule is followed to decide whether to modify the excitation vector direction after every short simulation run. The excitation vector is changed as soon as $\ell_n$, the displacement along $\textbf Q_n$, is larger than a threshold value $\ell_c$, and when $\cos {\alpha}$ is lower than a threshold value ${\cos \alpha}_c$. The conditions for choosing the excitation vector between $\textbf d_n$ and $\textbf Q_n$ for the next simulation are defined by:
+The second parameter relates to the relative deviation of the vector $\mathbf{d}_n$ with respect to vector $\mathbf{Q}_n$, evaluated by the angle $\alpha_n$ between them. More precisely, we consider the ${\cos \alpha}_n$ obtained by taking the scalar product of these vectors after normalizing $\mathbf{d}_n$, as following:
 
 $$
-\textbf Q_{n+1} = \begin{cases}
-  \textbf Q_n, & \text{if } \ell \leq \ell_c \\
-  \textbf Q_n, & \text{if } \ell \gt \ell_c \wedge \cos \alpha \ge  {\cos \alpha}_c \\
-  \textbf d_n, & \text{if } \ell \gt \ell_c \wedge \cos\alpha \lt {\cos\alpha}_c
+{\cos \alpha}_n = \frac {\mathbf{d}_n \mathbf{Q}_n} {\|\mathbf{d}_n\|}
+$$
+
+A precise rule is followed to decide whether to modify the excitation vector direction after every short simulation run. The excitation vector is changed as soon as $\ell_n$, the displacement along $\mathbf{Q}_n$, is larger than a threshold value $\ell_c$, and when $\cos {\alpha}$ is lower than a threshold value ${\cos \alpha}_c$. The conditions for choosing the excitation vector between $\mathbf{d}_n$ and $\mathbf{Q}_n$ for the next simulation are defined by:
+
+$$
+\mathbf{Q}_{n+1} = \begin{cases}
+  \mathbf{Q}_n, & \text{if } \ell \leq \ell_c \\
+  \mathbf{Q}_n, & \text{if } \ell \gt \ell_c \wedge \cos \alpha \ge  {\cos \alpha}_c \\
+  \mathbf{d}_n, & \text{if } \ell \gt \ell_c \wedge \cos \alpha \lt {\cos \alpha}_c
 \end{cases}
 $$
 
-The default values for $\ell_c$ and $\alpha$ are *0.5 m<sup>1/2</sup>Å* (*m* being atomic mass unit) and *60°*, respectively.
+The default value for $\ell_c$ is $0.5 m^{1/2} Å$ (with $m$ being atomic mass unit), and for $\alpha$ is $60°$.
 
 ## System De-Excitation
 At the end of each replica, a de-excitation molecular dynamics is submited in order to recover the equilibrated thermodynamics of the system. This final step aims to remove any residual MDeNM additional energy from the system and provide further sctructural and dynamical exploration.
@@ -160,19 +271,19 @@ Uses simpified force-field based on particles and springs computed automatically
 Uses physical force-field based normal modes computed in *[CHARMM](https://www.charmm.org/charmm/)*. A given normal mode (or a linear combination of several modes) is used to excite the system during the molecular dyamics simulation.
 
 # Configuration
-**pyAdMD** is distributed as a Python handler script that compute ENM modes, uniformly distributes linear combinations of modes in the N-dimensional hypersphere space, manage NAMD simulations and compute the projections along the excitation direction and apply the correction whenever necessary. An additional <code>tools</code> folder includes scripts not used by NAMD, such as the one to write down the CHARMM normal modes.
+**pyAdMD** is distributed as a Python handler script that compute ENM modes, uniformly distributes linear combinations of modes in the $N$-dimensional hypersphere space, manage NAMD simulations and compute the projections along the excitation direction and apply the correction whenever necessary. An additional <code>tools</code> folder includes scripts not used by NAMD, such as the one to write down the CHARMM normal modes.
 
 One can easily setup and run an Adaptive MDeNM simulation by using this script.
 The configuration process is straightforward. Some technical aspects will be covered in this section in order to facilitate the method comprehension.
 
 ## Energy injection
-The excitation time of Adaptive MDeNM is *0.2 ps*. This means that every *0.2 ps* the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of *0.125 kcal/mol* is sufficient to achieve a large exploration of the conformational space (*0.5 kcal/mol* if Cα-only ENM).
+The excitation time of Adaptive MDeNM is $0.2 ps$. This means that every $0.2 ps$ the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of $0.125 kcal/mol$ is sufficient to achieve a large exploration of the conformational space ($0.5 kcal/mol$ if Cα-only ENM).
 
 ## Simulation time
 The total simulation time may require a tuning depending on the system size, energy injection and nature of the motion being excited. Considering a large scale global motion, there is a trade-off between the energy injection and the total simulation time. Larger amounts of energy allows a shorter simulation time, however, this may not be advised as discussed above.
 
 ## Excitation direction update
-As described above, the direction is updated after the system has traveled a distance of *0.5 Å* along the excitation vector and its real displacement has a deviation of *60°* with respect to the theoretical one. The update can also be affected by the amount of energy injected, since higher energy values leads to larger motions. In addition, after each correction the new vector loses directionality due to anharmonic effects. This means that, at a given point, the new vectors are so diffuse that there is no point in proceed the simulation. When this ponit is reached, it is necessary to recompute the normal modes and start again. This is one more reason to not inject high energy values and let the system undergoes the changes slowly.
+As described above, the direction is updated after the system has traveled a distance of $0.5 Å$ along the excitation vector and its real displacement has a deviation of $60°$ with respect to the theoretical one. The update can also be affected by the amount of energy injected, since higher energy values leads to larger motions. In addition, after each correction the new vector loses directionality due to anharmonic effects. This means that, at a given point, the new vectors are so diffuse that there is no point in proceed the simulation. When this ponit is reached, it is necessary to recompute the normal modes and start again. This is one more reason to not inject high energy values and let the system undergoes the changes slowly.
 Alternatively, one can recompute ENM modes instead of change the excitation vector direction (only when the original model type is ENM).
 
 ## Number of modes and replicas
@@ -320,19 +431,44 @@ Furthermore, some basic analyses are written inside each replica folder at the e
 * ****
 
 # Usage Examples
-Example files are available at the **`tutorial`** folder (T4-lysozyme). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
+Example files are available at the **`tutorial`** folder (calmodulin). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
 
 ## Using CHARMM normal modes
 ```
-python pyAdMD.py run -type CHARMM -mod tutorial/modes.mod -psf tutorial/setup.psf -pdb tutorial/system.pdb -coor tutorial/system.coor -vel tutorial/system.vel -xsc tutorial/system.xsc -str tutorial/system.str
+python pyAdMD.py run -type CHARMM \
+                     -mod tutorial/system.mod \
+                     -psf tutorial/system.psf \
+                     -pdb tutorial/system.pdb \
+                     -coor tutorial/system.coor \
+                     -vel tutorial/system.vel \
+                     -xsc tutorial/system.xsc \
+                     -str tutorial/system.str
 ```
 ## Using Cα-only ENM with custom parameters
 ```
-python pyAdMD.py run -type CA -psf tutorial/setup.psf -pdb tutorial/system.pdb -coor tutorial/system.coor -vel tutorial/system.vel -xsc tutorial/system.xsc -str tutorial/system.str -nm 7,15,20 -ek 0.5 -t 100 -sel "protein and resid 1 to 60" -rep 60
+python pyAdMD.py run -type CA \
+                     -psf tutorial/system.psf \
+                     -pdb tutorial/system.pdb \
+                     -coor tutorial/system.coor \
+                     -vel tutorial/system.vel \
+                     -xsc tutorial/system.xsc \
+                     -str tutorial/system.str \
+                     -nm 7,8 \
+                     -ek 0.5 \
+                     -t 100 \
+                     -sel "protein and resid 4 to 148" \
+                     -rep 48
 ```
 ## Using heavy atoms without direction correction (standard MDeNM)
 ```
-python pyAdMD.py run -type HEAVY -psf tutorial/setup.psf -pdb tutorial/system.pdb -coor tutorial/system.coor -vel tutorial/system.vel -xsc tutorial/system.xsc -str tutorial/system.str --no_correc
+python pyAdMD.py run -type HEAVY \
+                     -psf tutorial/system.psf \
+                     -pdb tutorial/system.pdb \
+                     -coor tutorial/system.coor \
+                     -vel tutorial/system.vel \
+                     -xsc tutorial/system.xsc \
+                     -str tutorial/system.str \
+                     --no_correc
 ```
 ## Restart unfinished pyAdMD simulations
 ```
