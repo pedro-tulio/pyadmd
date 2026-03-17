@@ -3041,6 +3041,9 @@ def write_charmm_nm(nms_to_write, psffile, modefile, cwd):
         print(f"{console.PGM_ERR}Inspect the file {console.ERR}wrt-nm.out{console.STD} for detailed information.")
         sys.exit(1)
 
+    # Return to cwd folder
+    os.chdir(f"{cwd}")
+
 
 def run_namd(conf_file, psffile, pdbfile, strfile, loop_step, deexcitation=False):
     """
