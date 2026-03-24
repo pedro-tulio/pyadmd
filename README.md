@@ -55,11 +55,13 @@ This document will give an overview of the aMDeNM method and help to properly se
     - [Parameters](#parameters-1)
   - [Analysis](#analysis)
     - [Feature Flags](#feature-flags-1)
+    - [Skip Flags](#skip-flags)
 - [Analysis](#analysis-1)
   - [Basic Structural Properties Calculated](#basic-structural-properties-calculated)
   - [Analysis Modes](#analysis-modes)
     - [Standard Analysis](#standard-analysis)
     - [Rough Analysis](#rough-analysis)
+    - [Selective Analysis (Skip Flags)](#selective-analysis-skip-flags)
   - [Configuration Parameters](#configuration-parameters)
   - [Output Structure](#output-structure)
     - [Directory Organization](#directory-organization)
@@ -70,7 +72,8 @@ This document will give an overview of the aMDeNM method and help to properly se
   - [Using heavy atoms without direction correction (standard MDeNM)](#using-heavy-atoms-without-direction-correction-standard-mdenm)
   - [Restart unfinished pyAdMD simulations](#restart-unfinished-pyadmd-simulations)
   - [Append 100 ps to previously finished pyAdMD simulations](#append-100-ps-to-previously-finished-pyadmd-simulations)
-  - [Analyze pyAdMD simulations](#analyze-pyadmd-simulations)
+  - [Analyze pyAdMD simulations (all frames)](#analyze-pyadmd-simulations-all-frames)
+  - [Analyze every 5 ps skipping DSSP and SASA](#analyze-every-5-ps-skipping-dssp-and-sasa)
   - [Clean previous setup files](#clean-previous-setup-files)
 - [Dependencies](#dependencies)
 - [Citing](#citing)
@@ -341,6 +344,16 @@ Create an atom selection to apply the energy injection using *[MDAnalysis select
 ### Feature Flags
 - **`-r`/`--rough`**: Perform rough analysis (**optional**. Analyze every **`5`** ps instead of every frame.)
 
+### Skip Flags
+Each analysis step can be independently disabled. When skipped, that metric will not appear in any CSV, plot, or HTML summary output.
+
+- **`--no_rmsd`**: Skip RMSD calculation
+- **`--no_rg`**: Skip radius of gyration calculation
+- **`--no_sasa`**: Skip SASA calculation
+- **`--no_hp`**: Skip hydrophobic exposure calculation
+- **`--no_rmsf`**: Skip  RMSF calculation
+- **`--no_dssp`**: Skip secondary structure analysis via DSSP
+
 [Back to top ↩](#)
 * ****
 
@@ -372,6 +385,12 @@ The PyAdMD **`analysis`** module provides comprehensive analysis capabilities fo
 - Significantly reduces computation time
 - Suitable for quick overviews or large systems
 
+### Selective Analysis (Skip Flags)
+Individual analyses can be disabled at the command line. This is useful when:
+- DSSP is not installed (`--no_dssp`)
+- Only a subset of metrics is needed (e.g. RMSD + RMSF only)
+- Computation time needs to be minimized (SASA and DSSP are the most expensive steps)
+
 ## Configuration Parameters
 The analysis module reads simulation parameters from the `pyAdMD_params.json` file, which includes:
 
@@ -385,23 +404,23 @@ The analysis module reads simulation parameters from the `pyAdMD_params.json` fi
 ```
 analysis/
 ├── analysis_results.csv                # Combined analysis data from all replicas
-├── rmsf.csv                            # Combined RMSF data from all replicas
+├── rmsf.csv                            # Combined RMSF data (omitted with --no_rmsf)
 ├── analysis_summary.html               # HTML summary report
-├── rmsd_plot.png                       # RMSD plot for all replicas
-├── radius_gyration_plot.png            # Radius of gyration plot
-├── sasa_plot.png                       # SASA plot
-├── hydrophobic_exposure_plot.png       # Hydrophobic exposure plot
-├── rmsf_average.png                    # Average RMSF plot
-├── secondary_structure_average.png     # Average secondary structure plot
+├── rmsd_plot.png                       # RMSD plot (omitted with --no_rmsd)
+├── radius_gyration_plot.png            # Radius of gyration plot (omitted with --no_rg)
+├── sasa_plot.png                       # SASA plot (omitted with --no_sasa)
+├── hydrophobic_exposure_plot.png       # Hydrophobic exposure plot (omitted with --no_hp)
+├── rmsf_average.png                    # Average RMSF plot (omitted with --no_rmsf)
+├── secondary_structure_average.png     # Average secondary structure plot (omitted with --no_dssp)
 └── rep[1-N]/                           # Replica-specific directories
     ├── analysis_results.csv            # Replica-specific analysis data
-    ├── rmsf.csv                        # Replica-specific RMSF data
-    ├── rmsd_plot.png                   # Replica-specific RMSD plot
-    ├── radius_gyration_plot.png        # Replica-specific RoG plot
-    ├── sasa_plot.png                   # Replica-specific SASA plot
-    ├── hydrophobic_exposure_plot.png   # Replica-specific hydrophobic exposure plot
-    ├── rmsf_plot.png                   # Replica-specific RMSF plot
-    └── secondary_structure.png         # Replica-specific secondary structure plot
+    ├── rmsf.csv                        # Replica-specific RMSF data (omitted with --no_rmsf)
+    ├── rmsd_plot.png                   # Replica-specific RMSD plot (omitted with --no_rmsd)
+    ├── radius_gyration_plot.png        # Replica-specific RoG plot (omitted with --no_rg)
+    ├── sasa_plot.png                   # Replica-specific SASA plot (omitted with --no_sasa)
+    ├── hydrophobic_exposure_plot.png   # Replica-specific hydrophobic exposure plot (omitted with --no_hp)
+    ├── rmsf_plot.png                   # Replica-specific RMSF plot (omitted with --no_rmsf)
+    └── secondary_structure.png         # Replica-specific secondary structure plot (omitted with --no_dssp)
 ```
 
 ## Output Files Description
@@ -478,9 +497,15 @@ python pyAdMD.py restart
 ```
 python pyAdMD.py append -t 100
 ```
-## Analyze pyAdMD simulations
+## Analyze pyAdMD simulations (all frames)
 ```
-python pyAdMD.py analyze -r
+python pyAdMD.py analyze
+```
+## Analyze every 5 ps skipping DSSP and SASA
+```
+python pyAdMD.py analyze -r \
+                         --no_dssp \
+                         --no_sasa
 ```
 ## Clean previous setup files
 ```

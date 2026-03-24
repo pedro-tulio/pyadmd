@@ -1799,7 +1799,9 @@ class Analyzer:
         param_file (str): Path to parameter JSON file
         rough (bool): If True, analyze every 5ps instead of every frame
     """
-    def __init__(self, console, param_file="pyAdMD_params.json", rough=False):
+    def __init__(self, console, param_file="pyAdMD_params.json", rough=False,
+                 no_rmsd=False, no_rg=False, no_sasa=False, no_hp=False,
+                 no_rmsf=False, no_dssp=False):
         """
         Initializes Analyzer with configuration and parameters.
 
@@ -1807,10 +1809,22 @@ class Analyzer:
             console (ConsoleConfig): Console configuration object for formatted output
             param_file (str): Path to parameter JSON file
             rough (bool): If True, analyze every 5ps instead of every frame
+            no_rmsd (bool): If True, skip RMSD calculation
+            no_rg (bool): If True, skip radius of gyration calculation
+            no_sasa (bool): If True, skip SASA calculation
+            no_hp (bool): If True, skip hydrophobic exposure calculation
+            no_rmsf (bool): If True, skip RMSF calculation
+            no_dssp (bool): If True, skip secondary structure (DSSP) calculation
         """
         self.console = console
         self.param_file = param_file
         self.rough = rough
+        self.skip_rmsd = no_rmsd
+        self.skip_rg = no_rg
+        self.skip_sasa = no_sasa
+        self.skip_hp = no_hp
+        self.skip_rmsf = no_rmsf
+        self.skip_dssp = no_dssp
         self.params = self._load_parameters()
 
         # Create analysis directory
@@ -1863,7 +1877,18 @@ class Analyzer:
         sim_time = args.get('time', 250)  # Total simulation time in ps
 
         all_data = []
-        all_rmsf_data = []  # Store RMSF data per residue
+        all_rmsf_data = []  # Store RMSF data per residue (only if not skipped)
+
+        # Log skipped analyses
+        skipped = []
+        if self.skip_rmsd:   skipped.append("RMSD")
+        if self.skip_rg:     skipped.append("Radius of Gyration")
+        if self.skip_sasa:   skipped.append("SASA")
+        if self.skip_hp:     skipped.append("Hydrophobic Exposure")
+        if self.skip_rmsf:   skipped.append("RMSF")
+        if self.skip_dssp:   skipped.append("Secondary Structure (DSSP)")
+        if skipped:
+            print(f"{self.console.PGM_WRN}Skipping analyses: {self.console.WRN}{', '.join(skipped)}{self.console.STD}\n")
 
         # Prepare arguments for parallel processing
         replica_args = []
@@ -1933,10 +1958,11 @@ class Analyzer:
             print(f"{self.console.PGM_WRN}No analysis data was generated.")
             return
 
-        # Save RMSF data to separate CSV
-        csv_file = f"{self.analysis_dir}/rmsf.csv"
-        self._save_to_csv(all_rmsf_data, csv_file)
-        print(f"\n{self.console.PGM_NAM}Average RMSF results saved to {self.console.EXT}{csv_file}{self.console.STD}.")
+        # Save RMSF data to separate CSV (only if RMSF was computed)
+        if not self.skip_rmsf and all_rmsf_data:
+            csv_file = f"{self.analysis_dir}/rmsf.csv"
+            self._save_to_csv(all_rmsf_data, csv_file)
+            print(f"\n{self.console.PGM_NAM}Average RMSF results saved to {self.console.EXT}{csv_file}{self.console.STD}.")
 
         # Save all data to CSV
         csv_file = f"{self.analysis_dir}/analysis_results.csv"
@@ -1946,8 +1972,9 @@ class Analyzer:
         # Generate plots
         self._generate_plots(all_data, sim_time)
 
-        # Generate RMSF plots
-        self._generate_rmsf_avg_plot(all_rmsf_data)
+        # Generate RMSF plots (only if RMSF was computed)
+        if not self.skip_rmsf and all_rmsf_data:
+            self._generate_rmsf_avg_plot(all_rmsf_data)
 
         # Generate HTML summary
         self._generate_html_summary(all_data, sim_time)
@@ -2066,29 +2093,37 @@ class Analyzer:
                 frame_data = {
                     'replica': rep_num,
                     'time': time_points[i],
-                    'rmsd': self._calc_rmsd(selection, ref_positions),
-                    'radius_gyration': self._calc_rog(selection),
-                    'sasa': self._calc_sasa(u, rep_num, i),
-                    'hydrophobic_exposure': self._calculate_hp(u)
                 }
 
-                # Calculate secondary structure for selected frames only
-                if not self.rough or i % (frame_step * 5) == 0:  # Less frequent for SS to save time
-                    ss_data = self._calc_ss(u, rep_num, i)
-                    frame_data.update(ss_data)
-                else:
-                    # Use previous frame's SS data for rough analysis
-                    if data and 'helix' in data[-1]:
-                        for key in ['helix', 'sheet', 'coil', 'turn', 'other']:
-                            frame_data[key] = data[-1].get(key, 0)
+                if not self.skip_rmsd:
+                    frame_data['rmsd'] = self._calc_rmsd(selection, ref_positions)
+                if not self.skip_rg:
+                    frame_data['radius_gyration'] = self._calc_rog(selection)
+                if not self.skip_sasa:
+                    frame_data['sasa'] = self._calc_sasa(u, rep_num, i)
+                if not self.skip_hp:
+                    frame_data['hydrophobic_exposure'] = self._calculate_hp(u)
+
+                # Calculate secondary structure for selected frames only (if not skipped)
+                if not self.skip_dssp:
+                    if not self.rough or i % (frame_step * 5) == 0:  # Less frequent for SS to save time
+                        ss_data = self._calc_ss(u, rep_num, i)
+                        frame_data.update(ss_data)
                     else:
-                        # Default values if no previous data
-                        frame_data.update({'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0})
+                        # Use previous frame's SS data for rough analysis
+                        if data and 'helix' in data[-1]:
+                            for key in ['helix', 'sheet', 'coil', 'turn', 'other']:
+                                frame_data[key] = data[-1].get(key, 0)
+                        else:
+                            # Default values if no previous data
+                            frame_data.update({'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0})
 
                 data.append(frame_data)
 
-            # Calculate RMSF per residue (Cα atoms)
-            rmsf_data = self._calc_rmsf(u, rep_num)
+            # Calculate RMSF per residue (Cα atoms) — only if not skipped
+            rmsf_data = []
+            if not self.skip_rmsf:
+                rmsf_data = self._calc_rmsf(u, rep_num)
 
             # Generate replica-specific plots
             self._generate_replica_plots(data, rmsf_data, sim_time, rep_analysis_dir, rep_num)
@@ -2120,19 +2155,25 @@ class Analyzer:
         frame_data = {
             'replica': rep_num,
             'time': time_val,
-            'rmsd': self._calc_rmsd(selection, ref_positions),
-            'radius_gyration': self._calc_rog(selection),
-            'sasa': self._calc_sasa(u, rep_num, frame_idx),
-            'hydrophobic_exposure': self._calculate_hp(u)
         }
 
-        # Calculate secondary structure for selected frames only
-        if not self.rough or frame_idx % (frame_step * 5) == 0:  # Less frequent for SS to save time
-            ss_data = self._calc_ss(u, rep_num, frame_idx)
-            frame_data.update(ss_data)
-        else:
-            # Default values if no SS calculation
-            frame_data.update({'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0})
+        if not self.skip_rmsd:
+            frame_data['rmsd'] = self._calc_rmsd(selection, ref_positions)
+        if not self.skip_rg:
+            frame_data['radius_gyration'] = self._calc_rog(selection)
+        if not self.skip_sasa:
+            frame_data['sasa'] = self._calc_sasa(u, rep_num, frame_idx)
+        if not self.skip_hp:
+            frame_data['hydrophobic_exposure'] = self._calculate_hp(u)
+
+        # Calculate secondary structure for selected frames only (if not skipped)
+        if not self.skip_dssp:
+            if not self.rough or frame_idx % (frame_step * 5) == 0:  # Less frequent for SS to save time
+                ss_data = self._calc_ss(u, rep_num, frame_idx)
+                frame_data.update(ss_data)
+            else:
+                # Default values if no SS calculation
+                frame_data.update({'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0})
 
         return frame_data
 
@@ -2555,6 +2596,8 @@ class Analyzer:
     def _generate_html_summary(self, data, sim_time):
         """
         Generates an HTML summary of the analysis results.
+        Only includes sections for analyses that were actually computed
+        (i.e. not disabled via skip flags).
 
         Args:
             data (list): List of analysis data dictionaries
@@ -2566,39 +2609,57 @@ class Analyzer:
 
         df = pd.DataFrame(data)
 
+        # Build the list of (column, label, is_max) tuples for computed stats only
+        stat_specs = []
+        if not self.skip_rmsd:
+            stat_specs.append(('rmsd', 'Max RMSD (Å)', True))
+        if not self.skip_rg:
+            stat_specs.append(('radius_gyration', 'Final Radius of Gyration (Å)', False))
+        if not self.skip_sasa:
+            stat_specs.append(('sasa', 'Final SASA (Å²)', False))
+        if not self.skip_hp:
+            stat_specs.append(('hydrophobic_exposure', 'Max Hydrophobic Exposure (%)', True))
+        if not self.skip_dssp:
+            stat_specs += [
+                ('helix', 'Final Helix (residues)', False),
+                ('sheet', 'Final Sheet (residues)', False),
+                ('coil',  'Final Coil (residues)',  False),
+                ('turn',  'Final Turn (residues)',  False),
+                ('other', 'Final Other (residues)', False),
+            ]
+
         # Calculate statistics for each replica
         summary_data = {}
         for replica in df['replica'].unique():
             rep_data = df[df['replica'] == replica]
-            replica_summary = {
-                'Final Helix (residues)': rep_data['helix'].iloc[-1] if not rep_data.empty else 0,
-                'Final Sheet (residues)': rep_data['sheet'].iloc[-1] if not rep_data.empty else 0,
-                'Final Coil (residues)': rep_data['coil'].iloc[-1] if not rep_data.empty else 0,
-                'Final Turn (residues)': rep_data['turn'].iloc[-1] if not rep_data.empty else 0,
-                'Final Other (residues)': rep_data['other'].iloc[-1] if not rep_data.empty else 0,
-                'Max RMSD (Å)': rep_data['rmsd'].max() if not rep_data.empty else 0,
-                'Final Radius of Gyration (Å)': rep_data['radius_gyration'].iloc[-1] if not rep_data.empty else 0,
-                'Final SASA (Å²)': rep_data['sasa'].iloc[-1] if not rep_data.empty else 0,
-                'Max Hydrophobic Exposure (%)': rep_data['hydrophobic_exposure'].max() if not rep_data.empty else 0
-            }
+            replica_summary = {}
+            for col, label, use_max in stat_specs:
+                if col in rep_data.columns:
+                    val = rep_data[col].max() if use_max else rep_data[col].iloc[-1]
+                    replica_summary[label] = val if not rep_data.empty else 0
             summary_data[f'Replica {replica}'] = replica_summary
 
         # Calculate averages across all replicas
         avg_summary = {}
-        for stat in ['helix', 'sheet', 'coil', 'turn', 'other', 'rmsd', 'radius_gyration', 'sasa', 'hydrophobic_exposure']:
-            if stat == 'rmsd' or stat == 'hydrophobic_exposure':
-                # For these, we want the max value for each replica, then average those
-                max_values = df.groupby('replica')[stat].max()
-                avg_summary[f'Average Max {stat.upper()}'] = max_values.mean()
-            else:
-                # For others, we want the final value for each replica, then average those
-                final_values = df.groupby('replica')[stat].last()
-                avg_summary[f'Average Final {stat.upper()}'] = final_values.mean()
+        for col, label, use_max in stat_specs:
+            if col in df.columns:
+                if use_max:
+                    avg_summary[f'Average Max {col.upper()}'] = df.groupby('replica')[col].max().mean()
+                else:
+                    avg_summary[f'Average Final {col.upper()}'] = df.groupby('replica')[col].last().mean()
+
+        # Build conditional notes
+        notes_items = ["<li>For detailed analysis, see the files in the replica-specific subdirectories</li>"]
+        if not self.skip_dssp:
+            notes_items.insert(0, "<li>Secondary structure content is calculated using DSSP</li>")
+            notes_items.insert(1, "<li>Values represent the number of residues in each secondary structure type</li>")
+        if not self.skip_sasa:
+            notes_items.insert(-1, "<li>SASA is calculated using Bio.PDB.SASA (Shrake-Rupley algorithm)</li>")
+        notes_html = "\n                    ".join(notes_items)
 
         # Generate HTML file with escaped curly braces in CSS
         html_file = f"{self.analysis_dir}/analysis_summary.html"
         with open(html_file, 'w') as f:
-            # Use double curly braces to escape them in the CSS part
             html_template = """
             <!DOCTYPE html>
             <html lang="en">
@@ -2638,10 +2699,7 @@ class Analyzer:
 
                 <h2>Notes</h2>
                 <ul>
-                    <li>Secondary structure content is calculated using DSSP</li>
-                    <li>Values represent the number of residues in each secondary structure type</li>
-                    <li>SASA is calculated using Bio.PDB.SASA (Shrake-Rupley algorithm)</li>
-                    <li>For detailed analysis, see the files in the replica-specific subdirectories</li>
+                    {notes_html}
                 </ul>
             </body>
             </html>
@@ -2650,7 +2708,8 @@ class Analyzer:
                 date=time.strftime("%Y-%m-%d %H:%M:%S"),
                 replica_tables=self._html_rep_tables(summary_data),
                 avg_table_rows=self._html_summary_avg_table(avg_summary),
-                plot_items=self._html_summary_plots()
+                plot_items=self._html_summary_plots(),
+                notes_html=notes_html
             ))
 
         print(f"{self.console.PGM_NAM}HTML summary saved to {self.console.EXT}{html_file}{self.console.STD}")
@@ -2669,13 +2728,16 @@ class Analyzer:
 
         df = pd.DataFrame(data)
 
-        # Create individual plots for each property
-        properties = [
-            ('rmsd', 'RMSD (Å)', 'RMSD'),
-            ('radius_gyration', 'Radius of Gyration (Å)', 'Radius of Gyration'),
-            ('sasa', 'SASA (Å²)', 'SASA'),
-            ('hydrophobic_exposure', 'Hydrophobic Exposure (%)', 'Hydrophobic Exposure')
-        ]
+        # Create individual plots for each enabled property
+        properties = []
+        if not self.skip_rmsd:
+            properties.append(('rmsd', 'RMSD (Å)', 'RMSD'))
+        if not self.skip_rg:
+            properties.append(('radius_gyration', 'Radius of Gyration (Å)', 'Radius of Gyration'))
+        if not self.skip_sasa:
+            properties.append(('sasa', 'SASA (Å²)', 'SASA'))
+        if not self.skip_hp:
+            properties.append(('hydrophobic_exposure', 'Hydrophobic Exposure (%)', 'Hydrophobic Exposure'))
 
         for prop, ylabel, title in properties:
             plt.figure(figsize=(8, 6))
@@ -2695,8 +2757,9 @@ class Analyzer:
             plt.savefig(f"{self.analysis_dir}/{prop}_plot.png", bbox_inches='tight', dpi=300)
             plt.close()
 
-        # Create average secondary structure plot
-        self._generate_ss_avg_plot(df, sim_time)
+        # Create average secondary structure plot (only if DSSP was computed)
+        if not self.skip_dssp:
+            self._generate_ss_avg_plot(df, sim_time)
 
     def _generate_rmsf_avg_plot(self, rmsf_data):
         """
@@ -2849,13 +2912,16 @@ class Analyzer:
 
         df = pd.DataFrame(data)
 
-        # Create individual plots for each property
-        properties = [
-            ('rmsd', 'RMSD (Å)', 'RMSD'),
-            ('radius_gyration', 'Radius of Gyration (Å)', 'Radius of Gyration'),
-            ('sasa', 'SASA (Å²)', 'SASA'),
-            ('hydrophobic_exposure', 'Hydrophobic Exposure (%)', 'Hydrophobic Exposure'),
-        ]
+        # Create individual plots for each enabled property
+        properties = []
+        if not self.skip_rmsd:
+            properties.append(('rmsd', 'RMSD (Å)', 'RMSD'))
+        if not self.skip_rg:
+            properties.append(('radius_gyration', 'Radius of Gyration (Å)', 'Radius of Gyration'))
+        if not self.skip_sasa:
+            properties.append(('sasa', 'SASA (Å²)', 'SASA'))
+        if not self.skip_hp:
+            properties.append(('hydrophobic_exposure', 'Hydrophobic Exposure (%)', 'Hydrophobic Exposure'))
 
         for prop, ylabel, title in properties:
             plt.figure(figsize=(6, 6))
@@ -2870,19 +2936,20 @@ class Analyzer:
             plt.savefig(f"{rep_analysis_dir}/{prop}_plot.png", bbox_inches='tight', dpi=300)
             plt.close()
 
-        # Create RMSF plot for this replica
-        if rmsf_data:
+        # Create RMSF plot for this replica (only if computed)
+        if rmsf_data and not self.skip_rmsf:
             self._plot_rmsf_rep(rmsf_data, rep_analysis_dir, rep_num)
 
-        # Create secondary structure plot for this replica
-        self._plot_ss_rep(df, sim_time, rep_analysis_dir, rep_num)
+        # Create secondary structure plot for this replica (only if DSSP was computed)
+        if not self.skip_dssp:
+            self._plot_ss_rep(df, sim_time, rep_analysis_dir, rep_num)
 
         # Save replica data to CSV
         csv_file = f"{rep_analysis_dir}/analysis_results.csv"
         df.to_csv(csv_file, index=False)
 
-        # Save RMSF data to CSV
-        if rmsf_data:
+        # Save RMSF data to CSV (only if computed)
+        if rmsf_data and not self.skip_rmsf:
             rmsf_df = pd.DataFrame(rmsf_data)
             rmsf_csv_file = f"{rep_analysis_dir}/rmsf.csv"
             rmsf_df.to_csv(rmsf_csv_file, index=False)
@@ -2964,6 +3031,21 @@ def parse_arguments():
     opt_analyze = subparsers.add_parser('analyze', help="Analyze simulation results and generate plots")
     opt_analyze.add_argument('-r', '--rough', action='store_true',
                             help='Perform rough analysis (every 5ps instead of every frame)')
+
+    # Optional skip flags for analysis
+    analyze_skip = opt_analyze.add_argument_group('Skip flags (disable individual analyses)')
+    analyze_skip.add_argument('--no_rmsd', action='store_true',
+                              help='Skip RMSD calculation')
+    analyze_skip.add_argument('--no_rg', action='store_true',
+                              help='Skip radius of gyration calculation')
+    analyze_skip.add_argument('--no_sasa', action='store_true',
+                              help='Skip SASA calculation')
+    analyze_skip.add_argument('--no_hp', action='store_true',
+                              help='Skip hydrophobic exposure calculation')
+    analyze_skip.add_argument('--no_rmsf', action='store_true',
+                              help='Skip RMSF calculation')
+    analyze_skip.add_argument('--no_dssp', action='store_true',
+                              help='Skip secondary structure (DSSP) calculation')
 
     # CLEAN subparser
     subparsers.add_parser('clean', help="Erase all previous simulation files")
@@ -3457,7 +3539,16 @@ def main():
     ### ANALYZE
     elif args.option == 'analyze':
         print(f"{console.PGM_NAM}{console.TLE}Analyze pyAdMD results{console.STD}\n")
-        analyzer = Analyzer(console, rough=args.rough)
+        analyzer = Analyzer(
+            console,
+            rough=args.rough,
+            no_rmsd=args.no_rmsd,
+            no_rg=args.no_rg,
+            no_sasa=args.no_sasa,
+            no_hp=args.no_hp,
+            no_rmsf=args.no_rmsf,
+            no_dssp=args.no_dssp,
+        )
         analyzer.analyze_all_replicas()
 
     ### CLEAN
