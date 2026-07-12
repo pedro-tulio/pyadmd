@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyadmd"
+version = "3.0.0"
+description = "Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM) on OpenMM."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.12"
+authors = [
+    { name = "Pedro Túlio Resende-Lara", email = "laraptr@unicamp.br" },
+]
+keywords = [
+    "molecular dynamics",
+    "normal modes",
+    "aMDeNM",
+    "OpenMM",
+    "enhanced sampling",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+dependencies = [
+    "numpy>=2.2.5",
+    "scipy>=1.16.0",
+    "mdanalysis>=2.9.0",
+    "matplotlib>=3.10.0",
+    "seaborn",
+    "pandas",
+    # [cuda12] pip extra installs the CUDA-compiled OpenMM platform alongside
+    # the base CPU/OpenCL/Reference platforms (pip-native since OpenMM added
+    # cuda12/cuda13/hip6/hip7 extras — no separate conda/source build needed).
+    # Matches the CUDA 12.x pin used for cupy-cuda12x below; substitute
+    # openmm[cuda13] if targeting CUDA 13.x instead.
+    "openmm[cuda12]>=8.3.1",
+    "numba>=0.61.2",
+    "biopython",
+    # CUDA-version-specific CuPy wheel (required — enm/calculator.py imports
+    # cupy unconditionally at module load time). Pinned to cupy-cuda12x for
+    # CUDA 12.x toolkits. If your CUDA toolkit is 11.x, replace this line
+    # with cupy-cuda11x>=13.6 before installing.
+    "cupy-cuda12x>=13.6",
+]
+
+[project.scripts]
+pyadmd = "pyadmd.cli.main:main"
+
+[project.urls]
+Repository = "https://github.com/pedro-tulio/pyadmd"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pyadmd = ["charmm/wrt-nm.mdu", "charmm/charmm_toppar.zip"]
