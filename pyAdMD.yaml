@@ -8,6 +8,5 @@ dependencies:
   - scipy=1.16.0
   - mdanalysis=2.9.0
   - matplotlib=3.10.0
-  - openmm=8.3.1
   - numba=0.61.2
   - cupy=13.6.0

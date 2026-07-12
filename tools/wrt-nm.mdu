@@ -47,8 +47,10 @@ get nm unit 13
 vibran nmod 406
 open read file unit 40 name ../inputs/@modfile
 read norm file mode @nm unit 40
+! Get frequency of current mode
+print norm mode @nm
 fill comp mode 1 fact 1
-end 
+end
 
 ! When vibran fills comp array with the NM
 ! it divides the vector by sqrt(m), so we
@@ -60,10 +62,19 @@ scalar xcomp prod wmain
 scalar ycomp prod wmain
 scalar zcomp prod wmain
 
+! Get the mode frequency
+set awkcmd "awk '/VIBRATION MODE/ {if($3=="@nm") print $5}' ../wrt-nm.out > /tmp/temp.txt"
+system @awkcmd
+
+open read card unit 12 name /tmp/temp.txt
+get freq unit 12
+
 open write card unit 14 name ../inputs/mode_nm@nm.crd
-write coor comp card unit 14
+write coor comp card title unit 14
+* Frequency = @freq
 
 if @nmloop .lt. @modnu goto writemodes
+
 
 close unit 13
 
