@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyadmd"
-version = "3.0.0"
+version = "3.1.0"
 description = "Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM) on OpenMM."
 readme = "README.md"
 license = "GPL-3.0-or-later"

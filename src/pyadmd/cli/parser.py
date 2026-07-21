@@ -120,6 +120,10 @@ def parse_arguments() -> argparse.Namespace:
                               help='Skip RMSF calculation')
     analyze_skip.add_argument('--no_dssp', action='store_true',
                               help='Skip secondary structure (DSSP) calculation')
+    analyze_skip.add_argument('--no_dccm', action='store_true',
+                              help='Skip dCCM (dynamic cross-correlation matrix) calculation')
+    analyze_skip.add_argument('--no_lmi', action='store_true',
+                              help='Skip LMI (Linear Mutual Information) calculation')
 
     # FREEENERGY subparser
     opt_fe = subparsers.add_parser(

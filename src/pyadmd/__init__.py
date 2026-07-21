@@ -9,4 +9,4 @@ Importantly, aMDeNM requires only an initial structure without the need to speci
 it from many biased sampling techniques that rely on predefined target conformations.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"

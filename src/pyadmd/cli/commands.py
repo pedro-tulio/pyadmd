@@ -1,4 +1,4 @@
-"""Per-subcommand implementations, split out of the original monolithic main()."""
+"""Per-subcommand implementations."""
 
 import json
 import os
@@ -508,6 +508,8 @@ def cmd_analyze(args: Any, console: ConsoleConfig) -> None:
         no_hp=args.no_hp,
         no_rmsf=args.no_rmsf,
         no_dssp=args.no_dssp,
+        no_dccm=args.no_dccm,
+        no_lmi=args.no_lmi,
         source=args.source,
     )
     if args.source == 'freeenergy':
@@ -555,7 +557,7 @@ def cmd_clean(console: ConsoleConfig, cwd: str, input_dir: str) -> None:
     for item in files:
         if item.endswith((".json", "summary.txt")):
              os.remove(os.path.join(cwd, item))
-        if item.startswith(("rep", "analysis")):
+        if item.startswith(("rep", "analysis", "freeenergy")):
             shutil.rmtree(os.path.join(cwd, item), ignore_errors=True)
 
     # Removing previous configuration files
@@ -567,7 +569,7 @@ def cmd_clean(console: ConsoleConfig, cwd: str, input_dir: str) -> None:
         # Removing previous ENM calculations
         if item.endswith("_enm"):
             shutil.rmtree(os.path.join(input_dir, item), ignore_errors=True)
-    for item in ("charmm_toppar", "charmm_toppar"):
+    for item in ("charmm_toppar"):
             shutil.rmtree(os.path.join(input_dir, item), ignore_errors=True)
 
     print(f"{console.PGM_NAM}Erasing is done.\n")

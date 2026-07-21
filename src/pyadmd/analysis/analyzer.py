@@ -1,4 +1,4 @@
-"""Post-hoc structural analysis (RMSD, RoG, SASA, hydrophobic exposure, RMSF, DSSP)."""
+"""Post-hoc structural analysis (RMSD, RoG, SASA, hydrophobic exposure, RMSF, dCCM/LMI, DSSP)."""
 
 import glob
 import json
@@ -31,8 +31,9 @@ class Analyzer:
     Analyzes simulation results and generates plots.
 
     This class handles computation and visualization of various structural
-    properties from simulation trajectories including RMSD, radius of gyration,
-    SASA, hydrophobic exposure, secondary structure, and RMSF.
+    properties from simulation trajectories including RMSD, radius of
+    gyration, SASA, hydrophobic exposure, secondary structure, RMSF, and
+    dCCM/LMI residue-residue correlation matrices.
 
     Attributes:
         console (ConsoleConfig): Console configuration object for formatted output
@@ -44,10 +45,13 @@ class Analyzer:
             ('replica' for pyadmd, 'centroid_frame' for freeenergy).
         unit_label (str): Human-readable label for an analysis unit
             ('Replica' for pyadmd, 'Centroid frame' for freeenergy).
+        skip_dccm (bool): If True, skip dCCM calculation.
+        skip_lmi (bool): If True, skip LMI calculation.
     """
     def __init__(self, console: ConsoleConfig, param_file: str = "pyAdMD_params.json", rough: bool = False,
                  no_rmsd: bool = False, no_rg: bool = False, no_sasa: bool = False,
                  no_hp: bool = False, no_rmsf: bool = False, no_dssp: bool = False,
+                 no_dccm: bool = False, no_lmi: bool = False,
                  source: str = "pyadmd") -> None:
         """
         Initializes Analyzer with configuration and parameters.
@@ -62,6 +66,10 @@ class Analyzer:
             no_hp (bool): If True, skip hydrophobic exposure calculation
             no_rmsf (bool): If True, skip RMSF calculation
             no_dssp (bool): If True, skip secondary structure (DSSP) calculation
+            no_dccm (bool): If True, skip dCCM (dynamic cross-correlation
+                matrix) calculation
+            no_lmi (bool): If True, skip LMI (Linear Mutual Information)
+                calculation
             source (str): Trajectory source to analyze: 'pyadmd' (default) for
                 rep{N}.dcd replica trajectories, or 'freeenergy' for centroid
                 production trajectories from a completed 'freeenergy' run.
@@ -75,14 +83,12 @@ class Analyzer:
         self.skip_hp = no_hp
         self.skip_rmsf = no_rmsf
         self.skip_dssp = no_dssp
+        self.skip_dccm = no_dccm
+        self.skip_lmi = no_lmi
         self.source = source
         self.params = self._load_parameters()
 
         # Analysis unit terminology and output directory depend on source.
-        # NOTE (Phase 1): only the 'pyadmd' data path is wired up so far;
-        # 'freeenergy' plumbing (analysis_dir/unit_col/unit_label) is set
-        # here but the actual centroid-trajectory analysis path is not yet
-        # implemented (see analyze_all_centroids, added in a later phase).
         if self.source == "freeenergy":
             self.analysis_dir = os.path.join("analysis", "freeenergy")
             self.unit_col     = "centroid_frame"
@@ -175,6 +181,8 @@ class Analyzer:
 
         all_data = []
         all_rmsf_data = []  # Store RMSF data per residue (only if not skipped)
+        all_dccm = []        # Store per-unit dCCM matrices (only if not skipped)
+        all_lmi = []          # Store per-unit LMI matrices (only if not skipped)
 
         # Log skipped analyses
         skipped = []
@@ -184,6 +192,8 @@ class Analyzer:
         if self.skip_hp:     skipped.append("Hydrophobic Exposure")
         if self.skip_rmsf:   skipped.append("RMSF")
         if self.skip_dssp:   skipped.append("Secondary Structure (DSSP)")
+        if self.skip_dccm:   skipped.append("dCCM")
+        if self.skip_lmi:    skipped.append("LMI")
         if skipped:
             print(f"{self.console.PGM_WRN}Skipping analyses: {self.console.WRN}{', '.join(skipped)}{self.console.STD}\n")
 
@@ -227,10 +237,10 @@ class Analyzer:
             with mp.Pool(processes=min(self.num_cores, len(replica_args))) as pool:
                 # Create a progress tracking function
                 completed = 0
-                def update_progress(result: Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]]]) -> None:
+                def update_progress(result: Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]], Optional[np.ndarray], Optional[np.ndarray]]) -> None:
                     nonlocal completed
                     completed += 1
-                    rep_num, _, _ = result  # Unpack the result tuple
+                    rep_num, _, _, _, _ = result  # Unpack the result tuple
                     print(f"{self.console.PGM_NAM}Completed analysis of {self.console.EXT}{self.unit_label} {rep_num}{self.console.STD}"
                           f" [{self.console.EXT}{completed}{self.console.STD}/{self.console.WRN}{len(replica_args)}{self.console.STD}].")
 
@@ -243,11 +253,15 @@ class Analyzer:
 
                 # Wait for all results
                 for res in results:
-                    rep_num, rep_data, rep_rmsf_data = res.get()  # Unpack all three values
+                    rep_num, rep_data, rep_rmsf_data, rep_dccm, rep_lmi = res.get()  # Unpack all five values
                     if rep_data:
                         all_data.extend(rep_data)
                     if rep_rmsf_data:
                         all_rmsf_data.extend(rep_rmsf_data)
+                    if rep_dccm is not None and rep_dccm.size:
+                        all_dccm.append(rep_dccm)
+                    if rep_lmi is not None and rep_lmi.size:
+                        all_lmi.append(rep_lmi)
 
         else:
             print(f"{self.console.PGM_WRN}No replicas found for analysis.")
@@ -273,6 +287,12 @@ class Analyzer:
         # Generate RMSF plots (only if RMSF was computed)
         if not self.skip_rmsf and all_rmsf_data:
             self._generate_rmsf_avg_plot(all_rmsf_data)
+
+        # Generate average dCCM/LMI plots (only if computed)
+        if not self.skip_dccm and all_dccm:
+            self._generate_correlation_avg_plot(all_dccm, kind='dccm')
+        if not self.skip_lmi and all_lmi:
+            self._generate_correlation_avg_plot(all_lmi, kind='lmi')
 
         # Generate HTML summary
         self._generate_html_summary(all_data, sim_time)
@@ -340,7 +360,7 @@ class Analyzer:
             return
 
         # Shared time axis: production_ps from freeenergy/run_metadata.json
-        # (plays the role args['time'] plays for analyze_all_replicas)
+        # (same role args['time'] plays for analyze_all_replicas)
         run_metadata_path = f"{cwd}/freeenergy/run_metadata.json"
         try:
             with open(run_metadata_path) as fh:
@@ -354,6 +374,8 @@ class Analyzer:
 
         all_data = []
         all_rmsf_data = []  # Store RMSF data per residue (only if not skipped)
+        all_dccm = []        # Store per-unit dCCM matrices (only if not skipped)
+        all_lmi = []          # Store per-unit LMI matrices (only if not skipped)
 
         # Log skipped analyses
         skipped = []
@@ -363,6 +385,8 @@ class Analyzer:
         if self.skip_hp:     skipped.append("Hydrophobic Exposure")
         if self.skip_rmsf:   skipped.append("RMSF")
         if self.skip_dssp:   skipped.append("Secondary Structure (DSSP)")
+        if self.skip_dccm:   skipped.append("dCCM")
+        if self.skip_lmi:    skipped.append("LMI")
         if skipped:
             print(f"{self.console.PGM_WRN}Skipping analyses: {self.console.WRN}{', '.join(skipped)}{self.console.STD}\n")
 
@@ -394,10 +418,10 @@ class Analyzer:
             with mp.Pool(processes=min(self.num_cores, len(centroid_args))) as pool:
                 # Create a progress tracking function
                 completed = 0
-                def update_progress(result: Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]]]) -> None:
+                def update_progress(result: Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]], Optional[np.ndarray], Optional[np.ndarray]]) -> None:
                     nonlocal completed
                     completed += 1
-                    frame_idx, _, _ = result  # Unpack the result tuple
+                    frame_idx, _, _, _, _ = result  # Unpack the result tuple
                     print(f"{self.console.PGM_NAM}Completed analysis of {self.console.EXT}{self.unit_label} {frame_idx}{self.console.STD}"
                           f" [{self.console.EXT}{completed}{self.console.STD}/{self.console.WRN}{len(centroid_args)}{self.console.STD}].")
 
@@ -410,11 +434,15 @@ class Analyzer:
 
                 # Wait for all results
                 for res in results:
-                    frame_idx, frame_data, frame_rmsf_data = res.get()  # Unpack all three values
+                    frame_idx, frame_data, frame_rmsf_data, frame_dccm, frame_lmi = res.get()  # Unpack all five values
                     if frame_data:
                         all_data.extend(frame_data)
                     if frame_rmsf_data:
                         all_rmsf_data.extend(frame_rmsf_data)
+                    if frame_dccm is not None and frame_dccm.size:
+                        all_dccm.append(frame_dccm)
+                    if frame_lmi is not None and frame_lmi.size:
+                        all_lmi.append(frame_lmi)
 
         if not all_data:
             print(f"{self.console.PGM_WRN}No analysis data was generated.")
@@ -438,6 +466,12 @@ class Analyzer:
         if not self.skip_rmsf and all_rmsf_data:
             self._generate_rmsf_avg_plot(all_rmsf_data)
 
+        # Generate average dCCM/LMI plots (only if computed)
+        if not self.skip_dccm and all_dccm:
+            self._generate_correlation_avg_plot(all_dccm, kind='dccm')
+        if not self.skip_lmi and all_lmi:
+            self._generate_correlation_avg_plot(all_lmi, kind='lmi')
+
         # Generate HTML summary
         self._generate_html_summary(all_data, sim_time)
 
@@ -445,7 +479,7 @@ class Analyzer:
         print(f"{self.console.PGM_NAM}Results saved into {self.console.EXT}{self.analysis_dir}{self.console.STD} folder.")
 
     def _analyze_centroid_parallel(self, dcd_file: str, psf_file: str, frame_idx: int,
-                                   sim_time: float, out_dir: str) -> Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]]]:
+                                   sim_time: float, out_dir: str) -> Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]], Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Thin parallel wrapper that calls ``_analyze_trajectory`` for a single
         freeenergy centroid and prepends the centroid frame index.
@@ -462,18 +496,19 @@ class Analyzer:
             out_dir (str): Output directory for this centroid's analysis files.
 
         Returns:
-            tuple: A 3-element tuple of (frame_idx, data, rmsf_data), same
-                shape as ``_analyze_replica_parallel``'s return value.
+            tuple: A 5-element tuple of (frame_idx, data, rmsf_data, dccm,
+                lmi), same shape as ``_analyze_replica_parallel``'s return
+                value.
         """
         try:
             print(f"{self.console.PGM_NAM}Starting analysis of {self.console.EXT}{self.unit_label} {frame_idx}{self.console.STD}...")
-            data, rmsf_data = self._analyze_trajectory(psf_file, dcd_file, frame_idx, sim_time, out_dir)
-            return (frame_idx, data, rmsf_data)
+            data, rmsf_data, dccm, lmi = self._analyze_trajectory(psf_file, dcd_file, frame_idx, sim_time, out_dir)
+            return (frame_idx, data, rmsf_data, dccm, lmi)
         except Exception as e:
             print(f"{self.console.PGM_ERR}Error analyzing {self.console.ERR}{self.unit_label.lower()} {frame_idx}{self.console.STD}: {self.console.ERR}{e}{self.console.STD}.")
-            return (frame_idx, [], [])
+            return (frame_idx, [], [], None, None)
 
-    def _analyze_replica_parallel(self, rep_dir: str, rep_num: int, sim_time: int, rep_analysis_dir: str) -> Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def _analyze_replica_parallel(self, rep_dir: str, rep_num: int, sim_time: int, rep_analysis_dir: str) -> Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]], Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Thin parallel wrapper that calls analyze_replica and prepends the replica number.
 
@@ -487,20 +522,22 @@ class Analyzer:
             rep_analysis_dir (str): Output directory for replica-specific analysis files.
 
         Returns:
-            tuple: A 3-element tuple of (rep_num, data, rmsf_data) where:
+            tuple: A 5-element tuple of (rep_num, data, rmsf_data, dccm, lmi) where:
                 - rep_num (int): Replica identifier passed through for pool callback tracking.
                 - data (list[dict]): Per-frame structural property dictionaries; empty on failure.
                 - rmsf_data (list[dict]): Per-residue RMSF dictionaries; empty on failure.
+                - dccm (np.ndarray or None): (n_ca, n_ca) dCCM matrix; None if skipped/failed.
+                - lmi (np.ndarray or None): (n_ca, n_ca) LMI matrix; None if not requested/failed.
         """
         try:
             print(f"{self.console.PGM_NAM}Starting analysis of {self.console.EXT}{self.unit_label} {rep_num}{self.console.STD}...")
             result = self.analyze_replica(rep_dir, rep_num, sim_time, rep_analysis_dir)
-            return (rep_num, result[0], result[1])  # Return rep_num along with data
+            return (rep_num, result[0], result[1], result[2], result[3])  # Return rep_num along with data
         except Exception as e:
             print(f"{self.console.PGM_ERR}Error analyzing {self.console.ERR}{self.unit_label.lower()} {rep_num}{self.console.STD}: {self.console.ERR}{e}{self.console.STD}.")
-            return (rep_num, [], [])  # Return rep_num even on error
+            return (rep_num, [], [], None, None)  # Return rep_num even on error
 
-    def analyze_replica(self, rep_dir: str, rep_num: int, sim_time: int, rep_analysis_dir: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def analyze_replica(self, rep_dir: str, rep_num: int, sim_time: int, rep_analysis_dir: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Resolve the DCD/PSF paths for a single pyAdMD replica, then delegate
         the actual per-frame computation to ``_analyze_trajectory``.
@@ -512,13 +549,15 @@ class Analyzer:
             rep_analysis_dir (str): Output directory for replica-specific plots and CSV files.
 
         Returns:
-            tuple: A 2-element tuple of (data, rmsf_data) where:
+            tuple: A 4-element tuple of (data, rmsf_data, dccm, lmi) where:
                 - data (list[dict]): One dictionary per analyzed frame with keys:
                   replica, time, rmsd, radius_gyration, sasa, hydrophobic_exposure,
                   helix, sheet, coil, turn, other.
                 - rmsf_data (list[dict]): One dictionary per Cα atom with keys:
                   replica, residue_index, residue_name, rmsf.
-                Both lists are empty if the PSF or DCD file is not found.
+                - dccm (np.ndarray or None): (n_ca, n_ca) dCCM matrix.
+                - lmi (np.ndarray or None): (n_ca, n_ca) LMI matrix.
+                All are empty/None if the PSF or DCD file is not found.
         """
         # Find the DCD trajectory file for this replica
         dcd_files = sorted(glob.glob(f"{rep_dir}/rep{rep_num}.dcd"))
@@ -527,7 +566,7 @@ class Analyzer:
             dcd_files = sorted(glob.glob(f"{rep_dir}/rep*.dcd"))
         if not dcd_files:
             print(f"{self.console.PGM_WRN}No DCD trajectory found for {self.console.WRN}{self.unit_label.lower()} {rep_num}{self.console.STD}.")
-            return [], []
+            return [], [], None, None
 
         dcd_file = dcd_files[0]
 
@@ -535,23 +574,29 @@ class Analyzer:
         psf_file = f"{rep_dir}/../inputs/{self.params['args']['psffile'].split('/')[-1]}"
         if not os.path.exists(psf_file):
             print(f"{self.console.PGM_ERR}PSF file not found for {self.unit_label.lower()} {self.console.ERR}{rep_num}{self.console.STD}.")
-            return [], []
+            return [], [], None, None
 
         return self._analyze_trajectory(psf_file, dcd_file, rep_num, sim_time, rep_analysis_dir)
 
     def _analyze_trajectory(self, psf_file: str, dcd_file: str, unit_id: int,
-                            sim_time: float, out_dir: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+                            sim_time: float, out_dir: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Analyze every frame of a single trajectory (source-agnostic core).
 
         Loads the given DCD trajectory into an MDAnalysis Universe using the
         given PSF as topology, then computes per-frame RMSD, radius of
         gyration, SASA, hydrophobic exposure, and secondary structure
-        content, and calculates per-residue RMSF. Plots and CSV files are
-        written to ``out_dir``. This method contains the computation logic
-        shared by both the pyadmd (``analyze_replica``) and freeenergy
-        (``analyze_all_centroids``) source paths -- only trajectory/PSF
-        path resolution and output-directory naming differ between them.
+        content, and calculates per-residue RMSF plus (unless skipped) the
+        dCCM residue-residue correlation matrix and (if requested) LMI.
+        Plots and CSV files are written to ``out_dir``. This method
+        contains the computation logic shared by both the pyadmd
+        (``analyze_replica``) and freeenergy (``analyze_all_centroids``)
+        source paths -- only trajectory/PSF path resolution and
+        output-directory naming differ between them.
+
+        RMSF, dCCM, and LMI share a single per-frame Kabsch alignment pass
+        (performed once inside ``_calc_rmsf``) rather than each re-aligning
+        the trajectory independently.
 
         Args:
             psf_file (str): Absolute path to the PSF topology file.
@@ -564,9 +609,10 @@ class Analyzer:
                 files.
 
         Returns:
-            tuple: A 2-element tuple of (data, rmsf_data), same shape as
-                ``analyze_replica``'s return value. Both lists are empty on
-                failure.
+            tuple: A 4-element tuple of (data, rmsf_data, dccm, lmi), same
+                shape as ``analyze_replica``'s return value. ``data`` and
+                ``rmsf_data`` are empty lists, ``dccm``/``lmi`` are None,
+                on failure.
         """
         try:
             # Create universe from PSF topology + DCD trajectory
@@ -641,19 +687,45 @@ class Analyzer:
 
                 data.append(frame_data)
 
-            # If not skipped, calculate RMSF per residue (Cα atoms)
-            rmsf_data = []
-            if not self.skip_rmsf:
-                rmsf_data = self._calc_rmsf(u, unit_id)
+            # RMSF, dCCM, and LMI share one aligned-trajectory pass.
+            # This must run whenever RMSF is wanted OR dCCM is wanted OR
+            # LMI is wanted -- skipping RMSF's own reporting doesn't skip
+            # the shared alignment if dCCM/LMI still need it.
+            rmsf_data: List[Dict[str, Any]] = []
+            dccm: Optional[np.ndarray] = None
+            lmi: Optional[np.ndarray] = None
+            need_alignment = not (self.skip_rmsf and self.skip_dccm and self.skip_lmi)
+            if need_alignment:
+                rmsf_data, aligned_disp = self._calc_rmsf(u, unit_id)
+                if self.skip_rmsf:
+                    rmsf_data = []  # alignment ran for dCCM/LMI, but RMSF itself wasn't requested
+
+                if aligned_disp is not None:
+                    if not self.skip_dccm:
+                        dccm = self._calc_dccm(aligned_disp)
+                        if dccm.size:
+                            np.save(f"{out_dir}/dccm_matrix.npy", dccm)
+                            self._plot_correlation_matrix(
+                                dccm, f"{out_dir}/dccm_plot.png",
+                                f"dCCM \u2014 {self.unit_label} {unit_id}", kind='dccm'
+                            )
+                    if not self.skip_lmi:
+                        lmi = self._calc_lmi(aligned_disp)
+                        if lmi.size:
+                            np.save(f"{out_dir}/lmi_matrix.npy", lmi)
+                            self._plot_correlation_matrix(
+                                lmi, f"{out_dir}/lmi_plot.png",
+                                f"LMI \u2014 {self.unit_label} {unit_id}", kind='lmi'
+                            )
 
             # Generate unit-specific plots
             self._generate_replica_plots(data, rmsf_data, sim_time, out_dir, unit_id)
 
-            return data, rmsf_data
+            return data, rmsf_data, dccm, lmi
         except Exception as e:
             print(f"{self.console.PGM_ERR}Error analyzing {self.console.ERR}{self.unit_label.lower()} {unit_id}{self.console.STD}: {self.console.ERR}{e}{self.console.STD}.")
             traceback.print_exc()
-            return [], []
+            return [], [], None, None
 
     def _process_frame(self, u: mda.Universe, selection: mda.AtomGroup, ref_positions: np.ndarray,
                        frame_idx: int, time_val: float, rep_num: int, frame_step: int) -> Dict[str, Any]:
@@ -827,46 +899,65 @@ class Analyzer:
             print(f"{self.console.PGM_WRN}Could not calculate hydrophobic exposure: {e}")
             return 0
 
-    def _calc_rmsf(self, universe: mda.Universe, rep_num: int) -> List[Dict[str, Any]]:
+    def _calc_rmsf(self, universe: mda.Universe, rep_num: int) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray]]:
         """
-        Calculate per-residue RMSF for Cα atoms over the full trajectory.
+        Calculate per-residue RMSF for Cα atoms over the full trajectory,
+        and return the shared per-frame aligned Cα displacement array used
+        by dCCM/LMI.
 
         Selects Cα atoms, aligns each frame to the first-frame reference via a
-        rotation matrix, accumulates squared deviations, and returns the root-mean
-        value per residue.
+        rotation matrix, accumulates squared deviations, and returns the
+        root-mean value per residue. The same aligned, mean-centered
+        displacement trajectory (positions minus the mean structure) is
+        returned so that ``_calc_dccm``/``_calc_lmi`` can be computed from
+        it without repeating the Kabsch superposition.
 
         Args:
             universe (mda.Universe): MDAnalysis Universe object containing the trajectory.
             rep_num (int): Replica number identifier, stored in the returned records.
 
         Returns:
-            list[dict]: One dictionary per Cα atom with keys:
-                - replica (int): Replica number.
-                - residue_index (int): Residue sequence number (resid).
-                - residue_name (str): Three-letter residue name.
-                - rmsf (float): Root-mean-square fluctuation in Å.
-            Returns an empty list if no Cα atoms are found or an error occurs.
+            tuple: (rmsf_data, aligned_disp) where:
+                - rmsf_data (list[dict]): One dictionary per Cα atom with keys:
+                    - replica (int): Replica number.
+                    - residue_index (int): Residue sequence number (resid).
+                    - residue_name (str): Three-letter residue name.
+                    - rmsf (float): Root-mean-square fluctuation in Å.
+                  Empty list if no Cα atoms are found or an error occurs.
+                - aligned_disp (np.ndarray or None): Shape
+                  (n_frames, n_ca, 3), per-frame Kabsch-superposed Cα
+                  coordinates minus the mean structure (mean-centered), in
+                  Å. None if no Cα atoms are found or an error occurs.
         """
         try:
             # Select Cα atoms
             calphas = universe.select_atoms("protein and name CA")
             if len(calphas) == 0:
                 print(f"{self.console.PGM_WRN}No Cα atoms found for RMSF calculation.")
-                return []
+                return [], None
+
+            n_frames = len(universe.trajectory)
 
             # Store the first-frame positions as the alignment reference
             ref_coords = calphas.positions.copy()
-            rmsf_values = np.zeros(len(calphas))
+            aligned_coords = np.empty((n_frames, len(calphas), 3), dtype=np.float64)
 
-            for ts in universe.trajectory:
-                # Align each frame to the reference and accumulate squared deviations
+            for i, ts in enumerate(universe.trajectory):
+                # Align each frame to the reference
                 mobile_coords = calphas.positions
                 R, rmsd = align.rotation_matrix(mobile_coords, ref_coords)
                 calphas.positions = np.dot(mobile_coords, R.T)
-                rmsf_values += np.sum((calphas.positions - ref_coords) ** 2, axis=1)
+                aligned_coords[i] = calphas.positions
+
+            # Mean-center: subtract the average (aligned) structure. This
+            # is the shared array both RMSF (root-mean-square of these
+            # displacements) and dCCM/LMI (cross-correlation of these
+            # displacements) are computed from.
+            mean_coords = aligned_coords.mean(axis=0)
+            aligned_disp = aligned_coords - mean_coords[np.newaxis, :, :]
 
             # sqrt of mean squared deviation over all frames
-            rmsf_values = np.sqrt(rmsf_values / len(universe.trajectory))
+            rmsf_values = np.sqrt(np.mean(np.sum(aligned_disp ** 2, axis=2), axis=0))
 
             rmsf_data = []
             for i, atom in enumerate(calphas):
@@ -877,11 +968,203 @@ class Analyzer:
                     'rmsf': rmsf_values[i]
                 })
 
-            return rmsf_data
+            return rmsf_data, aligned_disp
 
         except Exception as e:
             print(f"{self.console.PGM_ERR}Error calculating RMSF: {e}")
-            return []
+            return [], None
+
+    def _calc_dccm(self, aligned_disp: np.ndarray) -> np.ndarray:
+        """
+        Compute the linear (Pearson) dynamic cross-correlation matrix
+        (dCCM) from a shared aligned/mean-centered Cα displacement
+        trajectory.
+
+            C_ij = <dr_i . dr_j> / sqrt(<dr_i^2> <dr_j^2>)
+
+        Values range from +1 (fully correlated motion) through 0
+        (uncorrelated) to -1 (fully anti-correlated motion).
+
+        Reference: Ichiye & Karplus, Proteins 1991, 11:205-217,
+        DOI: 10.1002/prot.340110305.
+
+        Args:
+            aligned_disp (np.ndarray): Shape (n_frames, n_ca, 3), per-frame
+                Kabsch-superposed, mean-centered Cα displacements in Å (as
+                returned by ``_calc_rmsf``).
+
+        Returns:
+            np.ndarray: Shape (n_ca, n_ca), symmetric, values in [-1, 1],
+                unit diagonal. Empty (0, 0) array on failure.
+        """
+        try:
+            # Dot product of displacement vectors between every pair of
+            # atoms, averaged over frames: (n_ca, n_ca). einsum sums over
+            # frames (f) and Cartesian components (k).
+            cross = np.einsum('fik,fjk->ij', aligned_disp, aligned_disp) / aligned_disp.shape[0]
+
+            # <dr_i^2> is the diagonal of `cross`
+            variances = np.diag(cross).copy()
+            variances[variances < 1e-12] = 1e-12  # guard against zero-fluctuation atoms
+
+            norm = np.sqrt(np.outer(variances, variances))
+            dccm = cross / norm
+
+            # Numerical safety: clip to [-1, 1] and force exact symmetry
+            dccm = np.clip(dccm, -1.0, 1.0)
+            dccm = 0.5 * (dccm + dccm.T)
+            np.fill_diagonal(dccm, 1.0)
+            return dccm
+
+        except Exception as e:
+            print(f"{self.console.PGM_ERR}Error calculating dCCM: {e}")
+            return np.zeros((0, 0))
+
+    def _calc_lmi(self, aligned_disp: np.ndarray) -> np.ndarray:
+        """
+        Compute the Linear Mutual Information (LMI) matrix from a shared
+        aligned/mean-centered Cα displacement trajectory, using the
+        Gaussian approximation of generalized correlation.
+
+            I_ij = 0.5 * [ln(det(Sigma_ii)) + ln(det(Sigma_jj)) - ln(det(Sigma_combined))]
+            LMI_ij = sqrt(1 - exp(-2/3 * I_ij))
+
+        where Sigma_ii, Sigma_jj are the 3x3 covariance matrices of atoms
+        i, j and Sigma_combined is the 6x6 joint covariance matrix of
+        (i, j). Unlike dCCM, LMI is signless (it measures total coupling
+        strength, not direction) and ranges over [0, 1].
+
+        Reference: Lange & Grubmüller, Proteins 2006, 62:1053-1061,
+        DOI: 10.1002/prot.20784.
+
+        Args:
+            aligned_disp (np.ndarray): Shape (n_frames, n_ca, 3), per-frame
+                Kabsch-superposed, mean-centered Cα displacements in Å (as
+                returned by ``_calc_rmsf``).
+
+        Returns:
+            np.ndarray: Shape (n_ca, n_ca), symmetric, values in [0, 1],
+                unit diagonal. Empty (0, 0) array on failure.
+        """
+        try:
+            n_frames, n_ca, _ = aligned_disp.shape
+            disp = aligned_disp  # (F, N, 3)
+
+            # Per-atom 3x3 covariance matrices: (n_ca, 3, 3)
+            cov_ii = np.einsum('fik,fil->ikl', disp, disp) / n_frames
+
+            # log(det(Sigma_ii)) per atom, shape (N,). A small Tikhonov
+            # regularization guards against near-singular covariance
+            # (e.g. an atom with negligible fluctuation).
+            eps_reg = 1e-10
+            eye3 = np.eye(3)
+            cov_ii_reg = cov_ii + eps_reg * eye3[np.newaxis, :, :]
+            sign_ii, logdet_ii = np.linalg.slogdet(cov_ii_reg)
+
+            lmi = np.zeros((n_ca, n_ca), dtype=np.float64)
+
+            # Only the joint 6x6 covariance genuinely needs a pairwise
+            # loop (it mixes atoms i and j); everything single-atom is
+            # precomputed above.
+            for i in range(n_ca):
+                di = disp[:, i, :]  # (F, 3)
+                for j in range(i + 1, n_ca):
+                    dj = disp[:, j, :]  # (F, 3)
+                    joint = np.concatenate([di, dj], axis=1)  # (F, 6)
+                    cov_ij = (joint.T @ joint) / n_frames      # (6, 6)
+                    cov_ij_reg = cov_ij + eps_reg * np.eye(6)
+                    sign_c, logdet_c = np.linalg.slogdet(cov_ij_reg)
+
+                    if sign_ii[i] <= 0 or sign_ii[j] <= 0 or sign_c <= 0:
+                        continue  # degenerate covariance; leave as 0
+
+                    I_ij = 0.5 * (logdet_ii[i] + logdet_ii[j] - logdet_c)
+                    I_ij = max(I_ij, 0.0)  # numerical noise can make this slightly negative
+                    val = np.sqrt(max(0.0, 1.0 - np.exp(-2.0 / 3.0 * I_ij)))
+                    lmi[i, j] = val
+                    lmi[j, i] = val
+
+            np.fill_diagonal(lmi, 1.0)
+            return lmi
+
+        except Exception as e:
+            print(f"{self.console.PGM_ERR}Error calculating LMI: {e}")
+            return np.zeros((0, 0))
+
+    def _plot_correlation_matrix(self, matrix: np.ndarray, out_path: str, title: str,
+                                 kind: str = 'dccm') -> None:
+        """
+        Plot and save a correlation-matrix heatmap. Shared by dCCM/LMI,
+        for both per-unit and cross-unit average matrices.
+
+        Args:
+            matrix (np.ndarray): (n_ca, n_ca) correlation matrix.
+            out_path (str): Output PNG path.
+            title (str): Plot title.
+            kind (str): 'dccm' (diverging colormap, red = +1 fully
+                correlated, white = 0 uncorrelated, blue = -1 fully
+                anti-correlated, range [-1, 1]) or 'lmi' (sequential
+                colormap, range [0, 1], since LMI has no sign).
+        """
+        if matrix.size == 0:
+            return
+        try:
+            fig, ax = plt.subplots(figsize=(7, 6))
+            if kind == 'lmi':
+                cmap = 'viridis'
+                vmin, vmax = 0.0, 1.0
+                cbar_label = 'LMI'
+            else:
+                cmap = 'RdBu_r'
+                vmin, vmax = -1.0, 1.0
+                cbar_label = 'Correlation coefficient'
+
+            im = ax.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower')
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label(cbar_label, fontsize=11)
+            ax.set_xlabel('Residue index', fontsize=12)
+            ax.set_ylabel('Residue index', fontsize=12)
+            ax.set_title(title, fontsize=13)
+            plt.tight_layout()
+            plt.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not create {kind.upper()} plot: {e}")
+
+    def _generate_correlation_avg_plot(self, matrices: List[np.ndarray], kind: str = 'dccm') -> None:
+        """
+        Compute and save the cross-unit average correlation matrix
+        (element-wise mean over all replicas/centroids), plus its heatmap.
+
+        Args:
+            matrices (list[np.ndarray]): One (n_ca, n_ca) matrix per unit.
+                All must share the same shape (same Cα count/topology).
+            kind (str): 'dccm' or 'lmi'; controls output filenames,
+                colormap, and value range (see ``_plot_correlation_matrix``).
+        """
+        if not matrices:
+            print(f"{self.console.PGM_WRN}No {kind.upper()} data to generate average plot.")
+            return
+        try:
+            shapes = {m.shape for m in matrices}
+            if len(shapes) > 1:
+                print(f"{self.console.PGM_WRN}{kind.upper()} matrices have "
+                      f"inconsistent shapes ({shapes}); skipping average "
+                      "(likely different Cα counts across units).")
+                return
+
+            avg_matrix = np.mean(np.stack(matrices, axis=0), axis=0)
+            np.save(f"{self.analysis_dir}/{kind}_average.npy", avg_matrix)
+            self._plot_correlation_matrix(
+                avg_matrix, f"{self.analysis_dir}/{kind}_average.png",
+                f"Average {kind.upper()} ({len(matrices)} {self.unit_label.lower()}s)",
+                kind=kind
+            )
+            print(f"{self.console.PGM_NAM}Average {kind.upper()} saved to "
+                  f"{self.console.EXT}{self.analysis_dir}/{kind}_average.png"
+                  f"{self.console.STD}.")
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not create average {kind.upper()} plot: {e}")
 
     def _calc_ss(self, u: mda.Universe, rep_num: int, frame_idx: int) -> Dict[str, int]:
         """
@@ -1177,6 +1460,13 @@ class Analyzer:
             notes_items.insert(1, "<li>Values represent the number of residues in each secondary structure type</li>")
         if not self.skip_sasa:
             notes_items.insert(-1, "<li>SASA is calculated using Bio.PDB.SASA (Shrake-Rupley algorithm)</li>")
+        if not self.skip_dccm:
+            notes_items.insert(-1, "<li>dCCM (dynamic cross-correlation matrix) uses linear Pearson "
+                                    "correlation of Kabsch-aligned Cα displacements; +1 = fully "
+                                    "correlated, 0 = uncorrelated, -1 = fully anti-correlated</li>")
+        if not self.skip_lmi:
+            notes_items.insert(-1, "<li>LMI (Linear Mutual Information) is signless (range [0, 1]) and "
+                                    "reports total coupling strength regardless of correlation direction</li>")
         notes_html = "\n                    ".join(notes_items)
 
         # Source note: which trajectories this summary was generated from
@@ -1416,7 +1706,8 @@ class Analyzer:
         plot_files = [
             "rmsd_plot.png", "radius_gyration_plot.png",
             "sasa_plot.png", "hydrophobic_exposure_plot.png",
-            "rmsf_average.png", "secondary_structure_average.png"
+            "rmsf_average.png", "secondary_structure_average.png",
+            "dccm_average.png", "lmi_average.png",
         ]
 
         plot_items = ""

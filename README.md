@@ -73,15 +73,13 @@ This document will give an overview of the aMDeNM method and help to properly se
     - [Directory Organization](#directory-organization-1)
   - [Output Files Description](#output-files-description-1)
 - [Usage Examples](#usage-examples)
-  - [Using CHARMM normal modes](#using-charmm-normal-modes)
-  - [Using Cα-only ENM with custom parameters](#using-cα-only-enm-with-custom-parameters)
-  - [Using heavy atoms without direction correction (standard MDeNM)](#using-heavy-atoms-without-direction-correction-standard-mdenm)
-  - [Using an OpenMM XML restart instead of NAMD binaries](#using-an-openmm-xml-restart-instead-of-namd-binaries)
+  - [Using OpenMM inputs and heavy atoms NMs](#using-openmm-inputs-and-heavy-atoms-nms)
+  - [Using NAMD inputs and Cα NMs with custom parameters](#using-namd-inputs-and-cα-nms-with-custom-parameters)
+  - [Using NAMD inputs and CHARMM NMs without direction correction (standard MDeNM)](#using-namd-inputs-and-charmm-nms-without-direction-correction-standard-mdenm)
   - [Restart unfinished pyAdMD simulations](#restart-unfinished-pyadmd-simulations)
   - [Append 100 ps to previously finished pyAdMD simulations](#append-100-ps-to-previously-finished-pyadmd-simulations)
   - [Analyze pyAdMD simulations (all frames)](#analyze-pyadmd-simulations-all-frames)
-  - [Analyze every 5 ps skipping DSSP and SASA](#analyze-every-5-ps-skipping-dssp-and-sasa)
-  - [Analyze freeenergy centroid production trajectories](#analyze-freeenergy-centroid-production-trajectories)
+  - [Analyze every 5 ps skipping DSSP and LMI](#analyze-every-5-ps-skipping-dssp-and-lmi)
   - [Compute a free energy landscape](#compute-a-free-energy-landscape)
   - [Extend a previous free energy calculation with more centroids and production time](#extend-a-previous-free-energy-calculation-with-more-centroids-and-production-time)
   - [Clean previous setup files](#clean-previous-setup-files)
@@ -377,6 +375,8 @@ Each analysis step can be independently disabled. When skipped, that metric will
 - **`--no_hp`**: Skip hydrophobic exposure calculation
 - **`--no_rmsf`**: Skip  RMSF calculation
 - **`--no_dssp`**: Skip secondary structure analysis via DSSP
+- **`--no_dccm`**: Skip dCCM (dynamic cross-correlation matrix) calculation
+- **`--no_lmi`**: Skip LMI (Linear Mutual Information) calculation
 
 **Note:** Before any analysis runs, the program checks if `pyadmd` or `freeenergy` calls are properly completed. If any unit hasn't reached its target, `analyze` aborts and lists the incomplete units rather than analyzing a partial trajectory. Complete them first with `restart`/`append` (pyadmd) or a further `freeenergy` call (freeenergy), then re-run `analyze`.
 
@@ -415,6 +415,10 @@ The PyAdMD **`analysis`** module provides comprehensive analysis capabilities fo
 
 6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
 
+7. **Dynamic Cross-Correlation Matrix (dCCM):** Measures pairwise linear correlation of Cα residue motions after Kabsch superposition to remove rigid-body rotation/translation. Values range from +1 (fully correlated motion) through 0 (uncorrelated) to −1 (fully anti-correlated motion), useful for identifying coupled domains, allosteric communication paths, and correlated/anti-correlated collective motions.
+
+8. **Linear Mutual Information (LMI):** An alternative, signless measure of residue-residue coupling strength (range [0, 1]) computed via the Gaussian approximation of generalized correlation. Unlike dCCM, LMI reports strongly anti-correlated motion with the same high value as strongly correlated motion, since it measures total coupling rather than its direction.
+
 ## Analysis Modes
 ### Standard Analysis
 - Analyzes every frame of the trajectory
@@ -430,7 +434,7 @@ The PyAdMD **`analysis`** module provides comprehensive analysis capabilities fo
 Individual analyses can be disabled at the command line. This is useful when:
 - DSSP is not installed (`--no_dssp`)
 - Only a subset of metrics is needed (e.g. RMSD + RMSF only)
-- Computation time needs to be minimized (SASA and DSSP are the most expensive steps)
+- Computation time needs to be minimized (SASA, DSSP, and LMI are the most expensive steps; LMI scales as O(n<sub>Cα</sub><sup>2</sup>) with a pairwise covariance computation)
 
 ## Trajectory Source
 The `-src`/`--source` flag selects which set of trajectories to analyze:
@@ -463,6 +467,10 @@ analysis/
 ├── hydrophobic_exposure_plot.png       # Hydrophobic exposure plot (omitted with --no_hp)
 ├── rmsf_average.png                    # Average RMSF plot (omitted with --no_rmsf)
 ├── secondary_structure_average.png     # Average secondary structure plot (omitted with --no_dssp)
+├── dccm_average.png                    # Average dCCM heatmap (omitted with --no_dccm)
+├── dccm_average.npy                    # Average dCCM matrix, raw (omitted with --no_dccm)
+├── lmi_average.png                     # Average LMI heatmap (omitted with --no_lmi)
+├── lmi_average.npy                     # Average LMI matrix, raw (omitted with --no_lmi)
 └── rep[1-N]/                           # Replica-specific directories
     ├── analysis_results.csv            # Replica-specific analysis data
     ├── rmsf.csv                        # Replica-specific RMSF data (omitted with --no_rmsf)
@@ -471,7 +479,11 @@ analysis/
     ├── sasa_plot.png                   # Replica-specific SASA plot (omitted with --no_sasa)
     ├── hydrophobic_exposure_plot.png   # Replica-specific hydrophobic exposure plot (omitted with --no_hp)
     ├── rmsf_plot.png                   # Replica-specific RMSF plot (omitted with --no_rmsf)
-    └── secondary_structure.png         # Replica-specific secondary structure plot (omitted with --no_dssp)
+    ├── secondary_structure.png         # Replica-specific secondary structure plot (omitted with --no_dssp)
+    ├── dccm_matrix.npy                 # Replica-specific dCCM matrix, raw (omitted with --no_dccm)
+    ├── dccm_plot.png                   # Replica-specific dCCM heatmap (omitted with --no_dccm)
+    ├── lmi_matrix.npy                  # Replica-specific LMI matrix, raw (omitted with --no_lmi)
+    └── lmi_plot.png                    # Replica-specific LMI heatmap (omitted with --no_lmi)
 ```
 
 With `-src freeenergy`, the same set of files is written under `analysis/freeenergy/` instead, with one subdirectory per centroid (named by frame index, mirroring `freeenergy/centroids/centroid_frame[F]/`) in place of `rep[1-N]/`:
@@ -486,6 +498,10 @@ analysis/freeenergy/
 ├── hydrophobic_exposure_plot.png       # Hydrophobic exposure plot (omitted with --no_hp)
 ├── rmsf_average.png                    # Average RMSF plot (omitted with --no_rmsf)
 ├── secondary_structure_average.png     # Average secondary structure plot (omitted with --no_dssp)
+├── dccm_average.png                    # Average dCCM heatmap (omitted with --no_dccm)
+├── dccm_average.npy                    # Average dCCM matrix, raw (omitted with --no_dccm)
+├── lmi_average.png                     # Average LMI heatmap (omitted with --no_lmi)
+├── lmi_average.npy                     # Average LMI matrix, raw (omitted with --no_lmi)
 └── centroid_frame[F]/                  # Centroid-specific directories
     ├── analysis_results.csv            # Centroid-specific analysis data
     ├── rmsf.csv                        # Centroid-specific RMSF data (omitted with --no_rmsf)
@@ -494,7 +510,11 @@ analysis/freeenergy/
     ├── sasa_plot.png                   # Centroid-specific SASA plot (omitted with --no_sasa)
     ├── hydrophobic_exposure_plot.png   # Centroid-specific hydrophobic exposure plot (omitted with --no_hp)
     ├── rmsf_plot.png                   # Centroid-specific RMSF plot (omitted with --no_rmsf)
-    └── secondary_structure.png         # Centroid-specific secondary structure plot (omitted with --no_dssp)
+    ├── secondary_structure.png         # Centroid-specific secondary structure plot (omitted with --no_dssp)
+    ├── dccm_matrix.npy                 # Centroid-specific dCCM matrix, raw (omitted with --no_dccm)
+    ├── dccm_plot.png                   # Centroid-specific dCCM heatmap (omitted with --no_dccm)
+    ├── lmi_matrix.npy                  # Centroid-specific LMI matrix, raw (omitted with --no_lmi)
+    └── lmi_plot.png                    # Centroid-specific LMI heatmap (omitted with --no_lmi)
 ```
 
 ## Output Files Description
@@ -507,7 +527,13 @@ analysis/freeenergy/
 - Combined plots showing all units
 - Average plots across all units
 
-3. **HTML Summary**
+3. **Correlation Matrix Files**
+- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) dCCM matrix, values in [-1, 1]. Omitted with `--no_dccm`.
+- **`dccm_plot.png`** / **`dccm_average.png`**: dCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
+- **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in [0, 1]. Omitted with `--no_lmi`.
+- **`lmi_plot.png`** / **`lmi_average.png`**: LMI heatmap, sequential colormap (LMI has no sign).
+
+4. **HTML Summary**
 - Interactive summary report with tables and embedded plots
 - Statistics for each unit and averages across all units
 - Easy navigation and visualization of results
@@ -524,7 +550,7 @@ Furthermore, some basic analyses are written inside each replica folder at the e
 * ****
 
 # Free Energy Landscape
-The **`freeenergy`** subcommand computes a free energy landscape (FEL) from a completed set of aMDeNM replicas, following the two-stage protocol of Costa *et al.* [DOI: 10.1021/acs.jctc.5b00003](https://doi.org/10.1021/acs.jctc.5b00003).
+The **`freeenergy`** subcommand computes a free energy landscape (FEL) from a completed set of aMDeNM replicas, following the two-stage protocol of [Costa *et al.*](https://doi.org/10.1021/acs.jctc.5b00003).
 
 ## Method Overview
 1. **Merge trajectories**: all `rep*.dcd` replica trajectories are concatenated into a single pseudo-trajectory.
@@ -576,21 +602,17 @@ freeenergy/
 * ****
 
 # Usage Examples
-Example files are available at the **`tutorial`** folder (calmodulin). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
+Example files are available at the **`tutorial`** folder (human calmodulin). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
 
-## Using CHARMM normal modes
+## Using OpenMM inputs and heavy atoms NMs
 ```
-pyadmd run -src NAMD \
-                     -m CHARMM \
-                     -mod tutorial/system.mod \
+pyadmd run -src OPENMM \
+                     -m HEAVY \
                      -psf tutorial/system.psf \
-                     -pdb tutorial/system.pdb \
-                     -coor tutorial/system.coor \
-                     -vel tutorial/system.vel \
-                     -xsc tutorial/system.xsc \
-                     -str tutorial/system.str
+                     -rst tutorial/system.rst \
+                     -pdb tutorial/system.pdb
 ```
-## Using Cα-only ENM with custom parameters
+## Using NAMD inputs and Cα NMs with custom parameters
 ```
 pyadmd run -src NAMD \
                      -m CA \
@@ -606,10 +628,11 @@ pyadmd run -src NAMD \
                      -sel "protein and resid 4 to 148" \
                      -rep 48
 ```
-## Using heavy atoms without direction correction (standard MDeNM)
+## Using NAMD inputs and CHARMM NMs without direction correction (standard MDeNM)
 ```
 pyadmd run -src NAMD \
-                     -m HEAVY \
+                     -m CHARMM \
+                     -mod tutorial/system.mod \
                      -psf tutorial/system.psf \
                      -pdb tutorial/system.pdb \
                      -coor tutorial/system.coor \
@@ -617,14 +640,6 @@ pyadmd run -src NAMD \
                      -xsc tutorial/system.xsc \
                      -str tutorial/system.str \
                      --no_correc
-```
-## Using an OpenMM XML restart instead of NAMD binaries
-```
-pyadmd run -src OPENMM \
-                     -m CA \
-                     -psf tutorial/system.psf \
-                     -pdb tutorial/system.pdb \
-                     -rst tutorial/system.rst
 ```
 ## Restart unfinished pyAdMD simulations
 ```
@@ -638,15 +653,9 @@ pyadmd append -t 100
 ```
 pyadmd analyze
 ```
-## Analyze every 5 ps skipping DSSP and SASA
+## Analyze every 5 ps skipping DSSP and LMI
 ```
-pyadmd analyze -r \
-                         --no_dssp \
-                         --no_sasa
-```
-## Analyze freeenergy centroid production trajectories
-```
-pyadmd analyze -src freeenergy
+pyadmd analyze -r --no_dssp --no_lmi
 ```
 ## Compute a free energy landscape
 ```
@@ -742,7 +751,7 @@ External system dependency (not pip-installable):
 # Citing
 Please cite the following paper if you are using any Adaptive MDeNM application in your work:
 
-[Resende-Lara, P. T. et al. Adaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein Conformational Space and Reveals the Functional Role of Frequency Coupling. *Journal of Chemical Theory and Computation*. 2026, 22, 13, 6304–6321. DOI: 10.1021/acs.jctc.6c00398](https://pubs.acs.org/doi/10.1021/acs.jctc.6c00398)
+[Resende-Lara, P. T. et al. Adaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein Conformational Space and Reveals the Functional Role of Frequency Coupling. *Journal of Chemical Theory and Computation*. DOI: 10.1021/acs.jctc.6c00398](https://pubs.acs.org/doi/10.1021/acs.jctc.6c00398)
 
 [Back to top ↩](#)
 * ****
@@ -755,7 +764,7 @@ See the [LICENSE](LICENSE) file for the full text.
 * ****
 
 # Contact
-If you experience a bug or have any doubt or suggestion, feel free to contact:
+If you experience a bug or have a suggestion, please contact:
 
 *[laraptr [at] unicamp.br](mailto:laraptr@unicamp.br)*
 
