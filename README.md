@@ -119,7 +119,7 @@ The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* w
 
 ### Problem Definition
 
-Let $`\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N \in \mathbb{R}^{3n}`$ be the $`N`$ normal mode vectors selected for excitation, where $`n`$ is the number of selected atoms. Each $`\mathbf{v}_k`$ is a flattened Cartesian displacement vector of length $`3n`$. The set of all normalized linear combinations of these vectors defines an $`N$-dimensional subspace of $`\mathbb{R}^{3n}`$:
+Let $`\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N \in \mathbb{R}^{3n}`$ be the $`N`$ normal mode vectors selected for excitation, where $`n`$ is the number of selected atoms. Each $`\mathbf{v}_k`$ is a flattened Cartesian displacement vector of length $`3n`$. The set of all normalized linear combinations of these vectors defines an $`N`$-dimensional subspace of $`\mathbb{R}^{3n}`$:
 
 $$
 \mathcal{V} = \mathrm{span}\{\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N\}
@@ -171,7 +171,7 @@ $$
 \langle \mathbf{x}_i \mathbf{Q}, \mathbf{x}_j \mathbf{Q} \rangle = \langle \mathbf{x}_i, \mathbf{x}_j \rangle
 $$
 
-The repulsion algorithm therefore operates on $`N$-dimensional coordinates $`\mathbf{x} \in \mathbb{R}^N`$ whose geometry is faithful to the physical mode subspace, at no additional cost relative to working in abstract factor space.
+The repulsion algorithm therefore operates on $`N`$-dimensional coordinates $`\mathbf{x} \in \mathbb{R}^N`$ whose geometry is faithful to the physical mode subspace, at no additional cost relative to working in abstract factor space.
 
 ### Energy Minimization Framework
 
@@ -189,7 +189,7 @@ $$
 U(r) = \frac{1}{r^{k}}, \quad k = N - 1
 $$
 
-The exponent $`k = N-1`$ is chosen for three reasons. First, the fundamental solution to Laplace's equation in $`N`$ dimensions scales as $`1/r^{N-2}`$, and the gradient of that solution scales as $`1/r^{N-1}`$, making this the natural repulsive force law in $`N$-dimensional space. Second, the surface area of $`S^{N-1}`$ grows as $`({2\pi e}/{N})^{N/2}`$, so stronger repulsion in higher dimensions is required to counteract the concentration-of-measure effect that causes random points to cluster near the equator. Third, the exponent ensures numerical stability by preventing excessively large or small force values as $`N`$ varies.
+The exponent $`k = N-1`$ is chosen for three reasons. First, the fundamental solution to Laplace's equation in $`N`$ dimensions scales as $`1/r^{N-2}`$, and the gradient of that solution scales as $`1/r^{N-1}`$, making this the natural repulsive force law in $`N`$-dimensional space. Second, the surface area of $`S^{N-1}`$ grows as $`({2\pi e}/{N})^{N/2}`$, so stronger repulsion in higher dimensions is required to counteract the concentration-of-measure effect that causes random points to cluster near the equator. Third, the exponent ensures numerical stability by preventing excessively large or small force values as $`N`$ varies.
 
 ### Gradient Flow on the Sphere
 
@@ -224,7 +224,7 @@ $$
 \{\pm\mathbf{e}_1, \pm\mathbf{e}_2, \dots, \pm\mathbf{e}_N\}
 $$
 
-provide an analytically optimal initialization in $`\mathbf{Q}$-coordinates and the repulsion loop is skipped. These vertices are already maximally separated on $`S^{N-1}`$ under the symmetry of the cross-polytope, yielding pairwise angular separations of either $`90°`$ or $`180°`$.
+provide an analytically optimal initialization in $`\mathbf{Q}`$-coordinates and the repulsion loop is skipped. These vertices are already maximally separated on $`S^{N-1}`$ under the symmetry of the cross-polytope, yielding pairwise angular separations of either $`90°`$ or $`180°`$.
 
 ### Normal Modes Linear Combination
 
@@ -243,7 +243,7 @@ $$
 where $`\mathbf{M}_{\mathrm{nm}}^+`$ denotes the Moore–Penrose pseudoinverse of $`\mathbf{M}_{\mathrm{nm}}`$. These approximate coefficients are written to the `factors.csv` output file for reference but do not influence the simulation; the physical vectors $`\mathbf{q}_i`$ are used directly as excitation directions.
 
 ## Kinetic Energy Control
-The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $`\mathbf{Q}`$ direction is calculated by projecting first the current velocities to the excitation direction $`\mathbf{Q}`$ as $`\mathbf{V}_p = (\mathbf{V}_{curr} \cdot \mathbf{Q}) \cdot \mathbf{Q}`$, where $`\mathbf{V}_{p}`$ and $`\mathbf{V}_{curr}`$ the $`3N$-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
+The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $`\mathbf{Q}`$ direction is calculated by projecting first the current velocities to the excitation direction $`\mathbf{Q}`$ as $`\mathbf{V}_p = (\mathbf{V}_{curr} \cdot \mathbf{Q}) \cdot \mathbf{Q}`$, where $`\mathbf{V}_{p}`$ and $`\mathbf{V}_{curr}`$ the $`3N`$-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
 
 $$
 E_k = \frac{1}{2} \mathbf{V}_{p}^T \mathbf{M}\ \mathbf{V}_p
@@ -289,7 +289,7 @@ Uses simpified force-field based on particles and springs computed automatically
 Uses physical force-field based normal modes computed in *[CHARMM](https://www.charmm.org/charmm/)*. A given normal mode (or a linear combination of several modes) is used to excite the system during the molecular dyamics simulation.
 
 # Configuration
-**pyadmd** is distributed as an installable Python package that computes ENM modes, uniformly distributes linear combinations of modes in the $`N$-dimensional hypersphere space, manages the OpenMM-based simulations, and computes the projections along the excitation direction, applying corrections whenever necessary. Its bundled data includes the CHARMM driver script used to write down CHARMM-computed normal modes.
+**pyadmd** is distributed as an installable Python package that computes ENM modes, uniformly distributes linear combinations of modes in the $`N`$-dimensional hypersphere space, manages the OpenMM-based simulations, and computes the projections along the excitation direction, applying corrections whenever necessary. Its bundled data includes the CHARMM driver script used to write down CHARMM-computed normal modes.
 
 One can easily setup and run an Adaptive MDeNM simulation using pyadmd.
 The configuration process is straightforward. Some technical aspects will be covered in this section in order to facilitate the method comprehension.
