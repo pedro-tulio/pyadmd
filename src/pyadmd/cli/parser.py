@@ -66,8 +66,8 @@ def parse_arguments() -> argparse.Namespace:
                              help="CHARMM normal mode file (required when type is CHARMM)")
     run_optional.add_argument('-nm', '--modes', action="store", type=str, default="7,8,9",
                              help="Normal modes to excite separated by commas (default: 7,8,9)")
-    run_optional.add_argument('-ek', '--energy', action="store", type=float, default=0.125,
-                             help="Excitation energy (default: 0.125 kcal/mol)")
+    run_optional.add_argument('-ek', '--energy', action="store", type=float, default=2,
+                             help="Excitation energy (default: 2 kcal/mol)")
     run_optional.add_argument('-t', '--time', action="store", type=int, default=250,
                              help="Total simulation time (default: 250ps)")
     run_optional.add_argument('-sel', '--selection', action="store", type=str, default="protein",
@@ -98,11 +98,11 @@ def parse_arguments() -> argparse.Namespace:
     # ANALYSIS subparser
     opt_analyze = subparsers.add_parser('analyze', help="Analyze simulation results and generate plots")
     opt_analyze.add_argument('-src', '--source', action="store", type=str.lower,
-                            default="pyadmd", choices=["pyadmd", "freeenergy"],
+                            default="pyadmd", choices=["pyadmd", "fel"],
                             help="Trajectory source to analyze: 'pyadmd' for rep{N}.dcd "
-                                 "replica trajectories (default), or 'freeenergy' for "
+                                 "replica trajectories (default), or 'fel' for "
                                  "centroid production trajectories from a completed "
-                                 "'freeenergy' run")
+                                 "'fel' run")
     opt_analyze.add_argument('-r', '--rough', action='store_true',
                             help='Perform rough analysis (every 5ps instead of every frame)')
 
@@ -113,9 +113,7 @@ def parse_arguments() -> argparse.Namespace:
     analyze_skip.add_argument('--no_rg', action='store_true',
                               help='Skip radius of gyration calculation')
     analyze_skip.add_argument('--no_sasa', action='store_true',
-                              help='Skip SASA calculation')
-    analyze_skip.add_argument('--no_hp', action='store_true',
-                              help='Skip hydrophobic exposure calculation')
+                              help='Skip SASA and hydrophobic exposure calculation')
     analyze_skip.add_argument('--no_rmsf', action='store_true',
                               help='Skip RMSF calculation')
     analyze_skip.add_argument('--no_dssp', action='store_true',
@@ -125,9 +123,9 @@ def parse_arguments() -> argparse.Namespace:
     analyze_skip.add_argument('--no_lmi', action='store_true',
                               help='Skip LMI (Linear Mutual Information) calculation')
 
-    # FREEENERGY subparser
+    # FREE ENERGY LANDSCAPE subparser
     opt_fe = subparsers.add_parser(
-        'freeenergy',
+        'fel',
         help="Compute free energy landscapes"
     )
     fe_params = opt_fe.add_argument_group('Optional parameters')
@@ -166,6 +164,19 @@ def parse_arguments() -> argparse.Namespace:
              'count exceeds this value, exactly N centroids are selected by '
              'greedy farthest-point (MaxMin) sampling to maximise '
              'conformational diversity (default: 50)')
+
+    fe_export = opt_fe.add_argument_group(
+        'Cluster inspection (skips the FEL protocol entirely when used)')
+    fe_export.add_argument(
+        '--export-cluster', type=int, default=None, metavar='FRAME',
+        help='Export the member frame list for one cluster, identified by '
+             'its centroid_frame value from clustering_summary.csv, instead '
+             'of running the FEL protocol. Requires a completed fel '
+             'run. Writes fel/exports/cluster_frame{FRAME}/members.csv.')
+    fe_export.add_argument(
+        '--dump-pdb', action='store_true',
+        help='With --export-cluster, also write one PDB file per member '
+             'frame to fel/exports/cluster_frame{FRAME}/pdbs/.')
 
     # CLEAN subparser
     subparsers.add_parser('clean', help="Erase all previous simulation files")
@@ -212,5 +223,10 @@ def parse_arguments() -> argparse.Namespace:
                 opt_run.error(
                     "The -rst/--rstfile argument is required when -src is OPENMM"
                 )
+
+    # Validate fel cluster-inspection flags
+    if hasattr(args, 'option') and args.option == 'fel':
+        if args.dump_pdb and args.export_cluster is None:
+            opt_fe.error("--dump-pdb requires --export-cluster FRAME")
 
     return args

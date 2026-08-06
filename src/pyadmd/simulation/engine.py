@@ -16,9 +16,10 @@ class OpenMMSimulationEngine:
 
     The (shared) System is passed in; a fresh LangevinMiddleIntegrator and
     Context are created per replica, giving each replica an independent RNG
-    seed.  Three reporters are attached once and fire automatically on every
-    call to simulation.step():
-      - DCDReporter:        1 frame per n_steps-step cycle
+    seed.  Up to three reporters are attached once and fire automatically on
+    every call to simulation.step():
+      - DCDReporter:        1 frame per n_steps-step cycle (only when
+                             attach_main_dcd=True; see __init__)
       - StateDataReporter:  1 energy/temperature row per cycle
       - CheckpointReporter: exact state every 10 * n_steps steps (10 cycles)
 
@@ -30,7 +31,8 @@ class OpenMMSimulationEngine:
                  platform_name: str = 'auto', n_threads: Optional[int] = None,
                  device_index: int = 0, rep_num: int = 1,
                  is_restart: bool = False, full_ener: bool = False,
-                 n_steps: int = 100) -> None:
+                 n_steps: int = 100, attach_main_dcd: bool = True,
+                 file_prefix: str = 'rep') -> None:
         """
         Initialize the simulation engine for a single replica.
 
@@ -45,8 +47,23 @@ class OpenMMSimulationEngine:
             rep_num (int): Replica number (used for output file names).
             is_restart (bool): Whether this is a restart (append to existing output files).
             full_ener (bool): If True, write per-term energy decomposition to
-                rep{N}_ener_decomp.log each cycle (--full_ener flag).
+                {file_prefix}{rep_num}_ener_decomp.log each cycle (--full_ener flag).
             n_steps (int): Number of MD steps per excitation cycle.
+            attach_main_dcd (bool): If True (default), attach a
+                DCDReporter writing {file_prefix}{rep_num}.dcd every n_steps
+                steps — the normal pyAdMD replica behavior. If False, this
+                reporter is never created, so no such file is written at
+                all. Used by callers (e.g. FreeEnergyCalculator's centroid
+                de-excitation/production/extension engines) that have no use
+                for this file and previously had to create it and then
+                immediately discard it via a since-removed detach step.
+            file_prefix (str): Prefix used for the log file
+                ({file_prefix}{rep_num}.log), and, if attach_main_dcd is
+                True, the main DCD file ({file_prefix}{rep_num}.dcd) and the
+                energy-decomposition log. Defaults to 'rep' (the normal
+                pyAdMD replica naming, e.g. rep1.log). FreeEnergyCalculator's
+                centroid engines pass 'centroid_' so log files read
+                centroid_{frame_idx}.log instead of rep{frame_idx}.log.
         """
         self.console = console
         self.n_atoms = system.getNumParticles()
@@ -69,13 +86,14 @@ class OpenMMSimulationEngine:
         )
 
         # Attach persistent reporters (append=True on restart)
-        dcd_file         = f'rep{rep_num}.dcd'
-        log_file         = f'rep{rep_num}.log'
-        ener_decomp_file = f'rep{rep_num}_ener_decomp.log'
+        log_file         = f'{file_prefix}{rep_num}.log'
+        ener_decomp_file = f'{file_prefix}{rep_num}_ener_decomp.log'
         self._total_steps = 0   # updated each run_cycle call; needed for 'progress'
-        self.simulation.reporters.append(
-            app.DCDReporter(dcd_file, n_steps, append=is_restart, enforcePeriodicBox=False)
-        )
+        if attach_main_dcd:
+            dcd_file = f'{file_prefix}{rep_num}.dcd'
+            self.simulation.reporters.append(
+                app.DCDReporter(dcd_file, n_steps, append=is_restart, enforcePeriodicBox=False)
+            )
         # Full StateDataReporter: every available scalar field written to the log file
         self.simulation.reporters.append(
             app.StateDataReporter(
@@ -341,11 +359,6 @@ class OpenMMSimulationEngine:
         """Close open file handles (call after the simulation loop finishes)."""
         if self._full_ener and hasattr(self, '_ener_decomp_fh') and not self._ener_decomp_fh.closed:
             self._ener_decomp_fh.close()
-
-    def detach_main_dcd(self) -> None:
-        """Remove the main replica DCD reporter (index 0) so that the
-        de-excitation run does not write extra frames into rep{N}.dcd."""
-        self.simulation.reporters.pop(0)
 
     def run_cycle(self, n_steps: int = 100, rep: int = 0, loop: int = 0) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
         """

@@ -13,7 +13,7 @@ from pyadmd.cli.commands import (
     cmd_restart,
     cmd_append,
     cmd_analyze,
-    cmd_freeenergy,
+    cmd_fel,
     cmd_clean,
 )
 
@@ -65,8 +65,8 @@ def main() -> None:
         cmd_append(args, console, mode_exciter, param_storage)
     elif args.option == 'analyze':
         cmd_analyze(args, console)
-    elif args.option == 'freeenergy':
-        cmd_freeenergy(args, console, param_storage)
+    elif args.option == 'fel':
+        cmd_fel(args, console, param_storage)
     elif args.option == 'clean':
         cmd_clean(console, cwd, input_dir)
 

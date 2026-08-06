@@ -53,12 +53,12 @@ class ConsoleConfig:
     ░░░░░       ░░░░░░
     '''
 
-    VERSION = '3.0.0'
+    VERSION = '3.1.1'
     CITATION = '''  Please cite:
 
     \tAdaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein Conformational Space
     \tand Reveals the Functional Role of Frequency Coupling.
     \tP.T. Resende-Lara, M.G.S. Costa, B. Dudas, J. Czigleczki, E. Balog, D. Perahia.
-    \tDOI: https://doi.org/10.1021/acs.jctc.6c00398'''
+    \tJ. Chem. Theory Comput. 14 July 2026; 22 (13): 6304–6321. https://doi.org/10.1021/acs.jctc.6c00398'''
 
     MESSAGE = "This program can setup and run multi-replica aMDeNM simulations through OpenMM."

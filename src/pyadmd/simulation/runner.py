@@ -141,12 +141,12 @@ class SimulationRunner:
                         if diff_pct > 5.0:
                             print(
                                 f"{console.PGM_WRN}WARNING: STR/initial-state box mismatch "
-                                f"for {lbl}: STR={str_l*10:.3f} Ang, "
-                                f"state={rst_l*10:.3f} Ang ({diff_pct:.1f}% difference)"
+                                f"for {console.WRN}{lbl}{console.STD}: STR={console.WRN}{str_l*10:.3f}{console.STD} Ang, "
+                                f"state={console.WRN}{rst_l*10:.3f}{console.STD} Ang ({console.WRN}{diff_pct:.1f}{console.STD}% difference)"
                             )
             except Exception as exc:
                 print(f"{console.PGM_WRN}WARNING: could not parse str box "
-                      f"({exc}); falling back to box derived from initial state.")
+                      f"({console.WRN}{exc}{console.STD}); falling back to box derived from initial state.")
                 str_box = None
 
         if str_box is None:
@@ -166,7 +166,7 @@ class SimulationRunner:
                 )
             except Exception as exc:
                 print(f"{console.PGM_WRN}WARNING: could not derive cell from initial state "
-                      f"({exc}); using placeholder box (not recommended).")
+                      f"({console.WRN}{exc}{console.STD}); using placeholder box (not recommended).")
                 str_box = None
 
         # Build OpenMM System with real box dimensions from .str file
@@ -180,8 +180,8 @@ class SimulationRunner:
         _omm_n = self._omm_system.getNumParticles()
         _psf_n = self._psf_omm.topology.getNumAtoms()
         if _omm_n != _psf_n:
-            raise RuntimeError(f"Atom count mismatch after system build: OpenMM system has {_omm_n} "
-                f"particles but the PSF topology ({psffile}) has {_psf_n} atoms.")
+            raise RuntimeError(f"Atom count mismatch after system build: OpenMM system has {console.ERR}{_omm_n}{console.STD} "
+                f"particles but the PSF topology ({console.WRN}{psffile}{console.STD}) has {console.WRN}{_psf_n}{console.STD} atoms.")
         print(f"{console.PGM_NAM}System atom count verified: "
               f"{console.EXT}{_omm_n}{console.STD} atoms in both OpenMM system and PSF.")
 
@@ -396,7 +396,7 @@ class SimulationRunner:
                     self._align_ref_pos_nm  = self._init_pos_nm.copy()
                 else:
                     raise RuntimeError(
-                        f"Cannot restart replica {rep}: correction_state.json missing."
+                        f"Cannot restart {self.console.ERR}Replica {rep}{self.console.STD}: correction_state.json missing."
                     )
 
             # DCD SYNC
@@ -408,14 +408,17 @@ class SimulationRunner:
                 if n_dcd_frames > 0:
                     if n_dcd_frames > loop:
                         print(f"{self.console.PGM_NAM}DCD sync: advancing loop from "
-                              f"{loop} to {n_dcd_frames} frames found in {dcd_path}.")
+                              f"{self.console.WRN}{loop}{self.console.STD} to {self.console.EXT}{n_dcd_frames}{self.console.STD} "
+                              f"frames found in {self.console.EXT}{dcd_path}{self.console.STD}.")
                         loop = n_dcd_frames
                     else:
-                        print(f"{self.console.PGM_NAM}DCD sync: {dcd_path} has "
-                              f"{n_dcd_frames} frames, consistent with JSON cycle {loop}.")
+                        print(f"{self.console.PGM_NAM}DCD sync: {self.console.EXT}{dcd_path}{self.console.STD} has "
+                              f"{self.console.EXT}{n_dcd_frames}{self.console.STD} frames, consistent with JSON cycle "
+                              f"{self.console.EXT}{loop}{self.console.STD}.")
                 else:
                     print(f"{self.console.PGM_WRN}Could not read DCD header for "
-                          f"replica {rep} ({dcd_path}). Proceeding with JSON cycle {loop}.")
+                          f"{self.console.WRN}Replica {rep}{self.console.STD} ({self.console.WRN}{dcd_path}{self.console.STD}). "
+                          f"Proceeding with JSON cycle {self.console.WRN}{loop}{self.console.STD}.")
 
             self._curr_pos_nm = self._init_pos_nm.copy()
             self._prev_pos_nm = self._init_pos_nm.copy()

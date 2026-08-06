@@ -20,7 +20,7 @@ from pyadmd.io.state import (
 from pyadmd.enm.calculator import ENMCalculator
 from pyadmd.modes.exciter import ModeExciter
 from pyadmd.simulation.runner import SimulationRunner
-from pyadmd.freeenergy.calculator import FreeEnergyCalculator
+from pyadmd.fel.calculator import FreeEnergyCalculator, export_cluster
 from pyadmd.analysis.analyzer import Analyzer
 from pyadmd.utils import ensure_charmm_toppar, unzip_file, write_charmm_nm
 
@@ -492,7 +492,7 @@ def cmd_append(args: Any, console: ConsoleConfig, mode_exciter: ModeExciter,
 def cmd_analyze(args: Any, console: ConsoleConfig) -> None:
     """
     Implements ``pyadmd analyze``: analyze either pyadmd replica
-    trajectories or freeenergy centroid production trajectories.
+    trajectories or fel centroid production trajectories.
 
     Args:
         args: Parsed CLI arguments for the ``analyze`` subcommand.
@@ -505,36 +505,48 @@ def cmd_analyze(args: Any, console: ConsoleConfig) -> None:
         no_rmsd=args.no_rmsd,
         no_rg=args.no_rg,
         no_sasa=args.no_sasa,
-        no_hp=args.no_hp,
         no_rmsf=args.no_rmsf,
         no_dssp=args.no_dssp,
         no_dccm=args.no_dccm,
         no_lmi=args.no_lmi,
         source=args.source,
     )
-    if args.source == 'freeenergy':
+    if args.source == 'fel':
         analyzer.analyze_all_centroids()
     else:
         analyzer.analyze_all_replicas()
 
 
-def cmd_freeenergy(args: Any, console: ConsoleConfig,
+def cmd_fel(args: Any, console: ConsoleConfig,
                     param_storage: ParameterStorage) -> None:
     """
-    Implements ``pyadmd freeenergy``: compute (or extend) the free energy
-    landscape from completed aMDeNM replicas.
+    Implements ``pyadmd fel``: compute (or extend) the free energy
+    landscape from completed aMDeNM replicas, or -- if ``--export-cluster``
+    is set -- export a single already-computed cluster's membership (and
+    optionally per-member PDBs) instead.
+
+    The export path deliberately runs before ``FreeEnergyCalculator`` is
+    constructed: it only needs the persisted clusters cache and the saved
+    run parameters, not the full calculator's OpenMM System build, which a
+    read-only cluster-inspection operation has no use for.
 
     Args:
-        args: Parsed CLI arguments for the ``freeenergy`` subcommand.
+        args: Parsed CLI arguments for the ``fel`` subcommand.
         console: Console configuration for formatted output.
         param_storage: Shared ParameterStorage instance.
     """
-    print(f"{console.PGM_NAM}{console.TLE}Free Energy Landscape Calculation"
-          f"{console.STD}\n")
-
     params = param_storage.load_parameters()
     if params is None:
         sys.exit(1)
+
+    if args.export_cluster is not None:
+        print(f"{console.PGM_NAM}{console.TLE}Export Cluster{console.STD}\n")
+        if not export_cluster(console, params, args):
+            sys.exit(1)
+        return
+
+    print(f"{console.PGM_NAM}{console.TLE}Free Energy Landscape Calculation"
+          f"{console.STD}\n")
 
     fe_calc = FreeEnergyCalculator(console, params, args)
     fe_calc.run()
@@ -557,7 +569,7 @@ def cmd_clean(console: ConsoleConfig, cwd: str, input_dir: str) -> None:
     for item in files:
         if item.endswith((".json", "summary.txt")):
              os.remove(os.path.join(cwd, item))
-        if item.startswith(("rep", "analysis", "freeenergy")):
+        if item.startswith(("rep", "analysis", "fel")):
             shutil.rmtree(os.path.join(cwd, item), ignore_errors=True)
 
     # Removing previous configuration files

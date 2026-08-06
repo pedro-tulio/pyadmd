@@ -17,6 +17,9 @@ from openmm import app, unit
 from pyadmd.console import ConsoleConfig
 from pyadmd.io.state import make_reference_universe
 
+# Ignore warnings
+import warnings
+warnings.filterwarnings('ignore')
 
 class ENMCalculator:
     """

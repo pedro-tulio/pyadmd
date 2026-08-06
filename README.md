@@ -12,9 +12,11 @@
              █████     ░░██████
             ░░░░░       ░░░░░░
 
-The Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM) method applies a kinetic excitation of normal modes (NMs) to enhance molecular dynamics simulations sampling. This technique consists in injecting additional atomic velocities along a combinations of NM vectors, creating an effective coupling between slow and fast molecular motions. The motions described by preselected directions of low-frequency NMs are dynamically adjusted throughout the simulation. By coupling low-frequency NM excitation with adaptive directional adjustments, aMDeNM facilitates extensive exploration of the energy landscape, overcoming the constraints of fixed, rectilinear displacements and alleviating structural stresses and environmental resistance. Importantly, aMDeNM requires only an initial structure without the need to specify predefined target states, distinguishing it from many biased sampling techniques that rely on predefined target conformations.
+The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method applies a kinetic excitation of normal modes (NMs) to enhance molecular dynamics simulations sampling. This technique consists in injecting additional atomic velocities along uniformily distributed combinations of NM vectors, creating an effective coupling between slow and fast molecular motions. The motions described by preselected directions of low-frequency NMs are dynamically adjusted throughout the simulation. By coupling low-frequency NM excitation with adaptive directional adjustments, aMDeNM facilitates extensive exploration of the energy landscape, overcoming the constraints of fixed, rectilinear displacements and alleviating structural stresses and environmental resistance. Importantly, aMDeNM requires only an initial structure without the need to specify predefined target states, distinguishing it from many biased sampling techniques that rely on predefined target conformations.
 
-This document will give an overview of the aMDeNM method and help to properly setup and run a simulation.
+[![aMDeNM remarkably improves sampling while offering mechanistical insights on biomolecular systems](.github/graphical_abstract.png)](https://pubs.acs.org/doi/10.1021/acs.jctc.6c00398)
+
+**pyAdMD** is a package designed to fully setup, run, and analyze aMDeNM simulations on a dedicated Python environment. This document provides an overview of the method and documents the package functionalities.
 
 * ****
 
@@ -45,16 +47,22 @@ This document will give an overview of the aMDeNM method and help to properly se
   - [Atom selection](#atom-selection)
 - [Input Requirements](#input-requirements)
   - [Run](#run)
-    - [Files](#files)
     - [Parameters](#parameters)
+    - [Files](#files)
     - [Feature Flags](#feature-flags)
   - [Append](#append)
     - [Parameters](#parameters-1)
+  - [Free Energy](#free-energy)
   - [Analysis](#analysis)
     - [Parameters](#parameters-2)
     - [Feature Flags](#feature-flags-1)
     - [Skip Flags](#skip-flags)
-  - [Free Energy](#free-energy)
+- [Free Energy Landscape](#free-energy-landscape)
+  - [Method Overview](#method-overview-1)
+  - [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation)
+  - [Output Structure](#output-structure)
+    - [Directory Organization](#directory-organization)
+  - [Output Files Description](#output-files-description)
 - [Analysis](#analysis-1)
   - [Basic Structural Properties Calculated](#basic-structural-properties-calculated)
   - [Analysis Modes](#analysis-modes)
@@ -62,13 +70,8 @@ This document will give an overview of the aMDeNM method and help to properly se
     - [Rough Analysis](#rough-analysis)
     - [Selective Analysis (Skip Flags)](#selective-analysis-skip-flags)
   - [Trajectory Source](#trajectory-source)
+  - [Handling Incomplete Units](#handling-incomplete-units)
   - [Configuration Parameters](#configuration-parameters)
-  - [Output Structure](#output-structure)
-    - [Directory Organization](#directory-organization)
-  - [Output Files Description](#output-files-description)
-- [Free Energy Landscape](#free-energy-landscape)
-  - [Method Overview](#method-overview-1)
-  - [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation)
   - [Output Structure](#output-structure-1)
     - [Directory Organization](#directory-organization-1)
   - [Output Files Description](#output-files-description-1)
@@ -110,34 +113,36 @@ The program computes Cα or heavy atoms Elastic Network Model using the same alg
 
 ## Uniform Normal Modes Combination
 
-The program generates uniformly distributed excitation vectors through a geometry-aware repulsion-based algorithm. The approach builds on a physics-inspired framework where points behave as charged particles confined to a spherical manifold, interacting through a dimensionally-scaled potential function. Unlike naive implementations that operate in an abstract factor space, the algorithm here accounts for the true geometry of the normal mode subspace before distributing the points, guaranteeing that the resulting excitation vectors are genuinely equidistant in the physical Cartesian space that governs the molecular dynamics. The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* was the first implementation built for the same purpose; the design presented here extends that concept with a geometry-corrected basis and a faster, more concise implementation.
+The program generates uniformly distributed excitation vectors through a geometry-aware repulsion-based algorithm. The approach builds on a physics-inspired framework where points behave as charged particles confined to a spherical manifold, interacting through a dimensionally-scaled potential function. Unlike naive implementations that operate in an abstract factor space, the algorithm here accounts for the true geometry of the normal mode subspace before distributing the points, guaranteeing that the resulting excitation vectors are genuinely equidistant in the physical Cartesian space that governs the molecular dynamics.
+
+The *[PDIM algorithm](https://github.com/antonielgomes/dpMDNM/tree/main/PDIM)* was the first implementation built for the same purpose; the design presented here extends that concept with a geometry-corrected basis and a faster, more concise implementation.
 
 ### Problem Definition
 
-Let $\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N \in \mathbb{R}^{3n}$ be the $N$ normal mode vectors selected for excitation, where $n$ is the number of selected atoms. Each $\mathbf{v}_k$ is a flattened Cartesian displacement vector of length $3n$. The set of all normalized linear combinations of these vectors defines an $N$-dimensional subspace of $\mathbb{R}^{3n}$:
+Let $`\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N \in \mathbb{R}^{3n}`$ be the $`N`$ normal mode vectors selected for excitation, where $`n`$ is the number of selected atoms. Each $`\mathbf{v}_k`$ is a flattened Cartesian displacement vector of length $`3n`$. The set of all normalized linear combinations of these vectors defines an $`N$-dimensional subspace of $`\mathbb{R}^{3n}`$:
 
 $$
 \mathcal{V} = \mathrm{span}\{\mathbf{v}_1, \mathbf{v}_2, \dots, \mathbf{v}_N\}
 $$
 
-Given an integer $P>0$, we seek to generate $P$ unit vectors $\{\mathbf{q}_1, \mathbf{q}_2, \dots, \mathbf{q}_P\} \subset \mathcal{V}$ that maximize the minimal pairwise angular separation:
+Given an integer $`P>0`$, we seek to generate $`P`$ unit vectors $`\{\mathbf{q}_1, \mathbf{q}_2, \dots, \mathbf{q}_P\} \subset \mathcal{V}`$ that maximize the minimal pairwise angular separation:
 
 $$
 \max_{{\mathbf{q}_i}} \min_{i \neq j} \|\mathbf{q}_i - \mathbf{q}_j\|
 $$
 
-This corresponds to finding an optimal spherical code on the unit hypersphere $S^{N-1}$ embedded within $\mathcal{V}$, with minimal angular separation between any two excitation directions.
+This corresponds to finding an optimal spherical code on the unit hypersphere $`S^{N-1}`$ embedded within $`\mathcal{V}`$, with minimal angular separation between any two excitation directions.
 
 ### Mode Subspace Geometry
 
-A naive approach would place the $N$ modes on coordinate axes and treat the combination coefficients $c_k$ directly as coordinates on $S^{N-1}$. This is geometrically valid only if the mode vectors satisfy $\langle \mathbf{v}_i, \mathbf{v}_j \rangle = \delta_{ij}$, i.e., they are orthonormal in plain Cartesian space. In practice this condition is not met. ENM mode vectors are orthogonal in the mass-weighted inner product but carry non-uniform amplitudes in Cartesian coordinates, with low-frequency modes typically exhibiting larger displacements than high-frequency ones. CHARMM normal modes may additionally lose orthogonality when projected onto an atomic subset. As a consequence, equal angular spacing of coefficient vectors in abstract factor space does not translate into equal angular spacing of the physical excitation vectors $\mathbf{q}_i$.
+A naive approach would place the $`N`$ modes on coordinate axes and treat the combination coefficients $`c_k`$ directly as coordinates on $`S^{N-1}`$. This is geometrically valid only if the mode vectors satisfy $`\langle \mathbf{v}_i, \mathbf{v}_j \rangle = \delta_{ij}`$, *i.e.*, they are orthonormal in plain Cartesian space. In practice this condition is not met. ENM mode vectors are orthogonal in the mass-weighted inner product but carry non-uniform amplitudes in Cartesian coordinates, with low-frequency modes typically exhibiting larger displacements than high-frequency ones. CHARMM normal modes may additionally lose orthogonality when projected onto an atomic subset. As a consequence, equal angular spacing of coefficient vectors in abstract factor space does not translate into equal angular spacing of the physical excitation vectors $`\mathbf{q}_i`$.
 
 To correct for this, the algorithm explicitly constructs an orthonormal basis
-for $\mathcal{V}$ using QR decomposition before running the repulsion algorithm.
+for $`\mathcal{V}`$ using QR decomposition before running the repulsion algorithm.
 
 ### Orthonormal Basis Construction
 
-Assemble the mode matrix $\mathbf{M}_{\mathrm{nm}} \in \mathbb{R}^{N \times 3n}$ whose rows are the flattened mode vectors:
+Assemble the mode matrix $`\mathbf{M}_{\mathrm{nm}} \in \mathbb{R}^{N \times 3n}`$ whose rows are the flattened mode vectors:
 
 $$
 \mathbf{M}_{\mathrm{nm}} =
@@ -148,29 +153,29 @@ $$
 \end{pmatrix}
 $$
 
-Apply QR decomposition to $\mathbf{M}_{\mathrm{nm}}^\top \in \mathbb{R}^{3n \times N}$:
+Apply QR decomposition to $`\mathbf{M}_{\mathrm{nm}}^\top \in \mathbb{R}^{3n \times N}`$:
 
 $$
 \mathbf{M}_{\mathrm{nm}}^\top = \mathbf{Q}_{\mathrm{qr}}\ \mathbf{R}
 $$
 
-where $\mathbf{Q}_{\mathrm{qr}} \in \mathbb{R}^{3n \times N}$ has orthonormal columns and $\mathbf{R} \in \mathbb{R}^{N \times N}$ is upper triangular. Setting $\mathbf{Q} = \mathbf{Q}_{\mathrm{qr}}^\top \in \mathbb{R}^{N \times 3n}$ yields an orthonormal row basis for $\mathcal{V}$:
+where $`\mathbf{Q}_{\mathrm{qr}} \in \mathbb{R}^{3n \times N}`$ has orthonormal columns and $`\mathbf{R} \in \mathbb{R}^{N \times N}`$ is upper triangular. Setting $`\mathbf{Q} = \mathbf{Q}_{\mathrm{qr}}^\top \in \mathbb{R}^{N \times 3n}`$ yields an orthonormal row basis for $`\mathcal{V}`$:
 
 $$
 \langle \mathbf{Q}_{i,:}, \mathbf{Q}_{j,:} \rangle = \delta_{ij}
 $$
 
-A point $\mathbf{x} \in \mathbb{R}^N$ on the unit hypersphere $S^{N-1}$ maps to a unit physical vector via $\mathbf{q} = \mathbf{x}\mathbf{Q} \in \mathbb{R}^{3n}$, and because $\mathbf{Q}$ is an isometric embedding, inner products are preserved:
+A point $`\mathbf{x} \in \mathbb{R}^N`$ on the unit hypersphere $`S^{N-1}`$ maps to a unit physical vector via $`\mathbf{q} = \mathbf{x}\mathbf{Q} \in \mathbb{R}^{3n}`$, and because $`\mathbf{Q}`$ is an isometric embedding, inner products are preserved:
 
 $$
 \langle \mathbf{x}_i \mathbf{Q}, \mathbf{x}_j \mathbf{Q} \rangle = \langle \mathbf{x}_i, \mathbf{x}_j \rangle
 $$
 
-The repulsion algorithm therefore operates on $N$-dimensional coordinates $\mathbf{x} \in \mathbb{R}^N$ whose geometry is faithful to the physical mode subspace, at no additional cost relative to working in abstract factor space.
+The repulsion algorithm therefore operates on $`N$-dimensional coordinates $`\mathbf{x} \in \mathbb{R}^N`$ whose geometry is faithful to the physical mode subspace, at no additional cost relative to working in abstract factor space.
 
 ### Energy Minimization Framework
 
-The distribution problem is cast as an energy minimization over $P$ points $\{\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_P\} \subset S^{N-1}$:
+The distribution problem is cast as an energy minimization over $`P`$ points $`\{\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_P\} \subset S^{N-1}`$:
 
 $$
 E = \sum_{i=1}^{P} \sum_{\substack{j=1 \\ j \neq i}}^{P} U \left(\|\mathbf{x}_i - \mathbf{x}_j\|\right)
@@ -184,82 +189,82 @@ $$
 U(r) = \frac{1}{r^{k}}, \quad k = N - 1
 $$
 
-The exponent $k = N-1$ is chosen for three reasons. First, the fundamental solution to Laplace's equation in $N$ dimensions scales as $1/r^{N-2}$, and the gradient of that solution scales as $1/r^{N-1}$, making this the natural repulsive force law in $N$-dimensional space. Second, the surface area of $S^{N-1}$ grows as $({2\pi e}/{N})^{N/2}$, so stronger repulsion in higher dimensions is required to counteract the concentration-of-measure effect that causes random points to cluster near the equator. Third, the exponent ensures numerical stability by preventing excessively large or small force values as $N$ varies.
+The exponent $`k = N-1`$ is chosen for three reasons. First, the fundamental solution to Laplace's equation in $`N`$ dimensions scales as $`1/r^{N-2}`$, and the gradient of that solution scales as $`1/r^{N-1}`$, making this the natural repulsive force law in $`N$-dimensional space. Second, the surface area of $`S^{N-1}`$ grows as $`({2\pi e}/{N})^{N/2}`$, so stronger repulsion in higher dimensions is required to counteract the concentration-of-measure effect that causes random points to cluster near the equator. Third, the exponent ensures numerical stability by preventing excessively large or small force values as $`N`$ varies.
 
 ### Gradient Flow on the Sphere
 
-The repulsive force on point $\mathbf{x}_i$ arising from all other points is:
+The repulsive force on point $`\mathbf{x}_i`$ arising from all other points is:
 
 $$
 \mathbf{f}_i = \sum_{\substack{j=1 \\ j \neq i}}^{P}
 \frac{\mathbf{x}_i - \mathbf{x}_j}{\|\mathbf{x}_i - \mathbf{x}_j\|^{N+1}}
 $$
 
-Since the points must remain on $S^{N-1}$, the gradient is projected onto the tangent plane at $\mathbf{x}_i$ to eliminate any radial component:
+Since the points must remain on $`S^{N-1}`$, the gradient is projected onto the tangent plane at $`\mathbf{x}_i`$ to eliminate any radial component:
 
 $$
 \tilde{\mathbf{f}}_i = \mathbf{f}_i - \left(\mathbf{f}_i \cdot \mathbf{x}_i\right) \mathbf{x}_i
 $$
 
-Each iteration updates the points by a fixed step $\eta = 0.001$ along their
-tangent-plane forces and then renormalizes back onto $S^{N-1}$:
+Each iteration updates the points by a fixed step $`\eta = 0.001`$ along their
+tangent-plane forces and then renormalizes back onto $`S^{N-1}`$:
 
 $$
 \mathbf{x}_i \leftarrow \frac{\mathbf{x}_i + \eta\,\tilde{\mathbf{f}}_i}
 {\|\mathbf{x}_i + \eta\,\tilde{\mathbf{f}}_i\|}
 $$
 
-Convergence is declared when $\max_i \|\mathbf{f}_i\|_\infty < 10^{-6}$, and the iteration is terminated early when the maximum force changes by less than $10^{-7}$ over five consecutive iterations (stagnation criterion).
+Convergence is declared when $`\max_i \|\mathbf{f}_i\|_\infty < 10^{-6}`$, and the iteration is terminated early when the maximum force changes by less than $`10^{-7}`$ over five consecutive iterations (stagnation criterion).
 
 ### Special Case: Cross-Polytope Initialization
 
-When $P=2N$, the $2N$ vertices of the cross-polytope:
+When $`P=2N`$, the $`2N`$ vertices of the cross-polytope:
 
 $$
 \{\pm\mathbf{e}_1, \pm\mathbf{e}_2, \dots, \pm\mathbf{e}_N\}
 $$
 
-provide an analytically optimal initialization in $\mathbf{Q}$-coordinates and the repulsion loop is skipped. These vertices are already maximally separated on $S^{N-1}$ under the symmetry of the cross-polytope, yielding pairwise angular separations of either $90°$ or $180°$.
+provide an analytically optimal initialization in $`\mathbf{Q}$-coordinates and the repulsion loop is skipped. These vertices are already maximally separated on $`S^{N-1}`$ under the symmetry of the cross-polytope, yielding pairwise angular separations of either $`90°`$ or $`180°`$.
 
 ### Normal Modes Linear Combination
 
-Once the coordinates $\{\mathbf{x}_1, \dots, \mathbf{x}_P\}$ have converged on $S^{N-1}$, each is mapped back to a physical excitation vector via the orthonormal basis $\mathbf{Q}$:
+Once the coordinates $`\{\mathbf{x}_1, \dots, \mathbf{x}_P\}`$ have converged on $`S^{N-1}`$, each is mapped back to a physical excitation vector via the orthonormal basis $`\mathbf{Q}`$:
 
 $$
 \mathbf{q}_i = \mathbf{x}_i \mathbf{Q} \in \mathbb{R}^{3n}, \qquad \|\mathbf{q}_i\| = 1
 $$
 
-The equivalent scalar combination factors $\{c_{i,k}\}$ in terms of the original (non-orthonormal) mode vectors — useful for logging and interpretability — are recovered by least-squares projection:
+The equivalent scalar combination factors $`\{c_{i,k}\}`$ in terms of the original (non-orthonormal) mode vectors — useful for logging and interpretability — are recovered by least-squares projection:
 
 $$
 \mathbf{c}_i = \mathbf{q}_i \, \mathbf{M}_{\mathrm{nm}}^+ \in \mathbb{R}^N
 $$
 
-where $\mathbf{M}_{\mathrm{nm}}^+$ denotes the Moore–Penrose pseudoinverse of $\mathbf{M}_{\mathrm{nm}}$. These approximate coefficients are written to the `factors.csv` output file for reference but do not influence the simulation; the physical vectors $\mathbf{q}_i$ are used directly as excitation directions.
+where $`\mathbf{M}_{\mathrm{nm}}^+`$ denotes the Moore–Penrose pseudoinverse of $`\mathbf{M}_{\mathrm{nm}}`$. These approximate coefficients are written to the `factors.csv` output file for reference but do not influence the simulation; the physical vectors $`\mathbf{q}_i`$ are used directly as excitation directions.
 
 ## Kinetic Energy Control
-The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $\mathbf{Q}$ direction is calculated by projecting first the current velocities to the excitation direction $\mathbf{Q}$ as $\mathbf{V}_p = (\mathbf{V}_{curr} \cdot \mathbf{Q}) \cdot \mathbf{Q}$, where $\mathbf{V}_{p}$ and $\mathbf{V}_{curr}$ the $3N$-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
+The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $`\mathbf{Q}`$ direction is calculated by projecting first the current velocities to the excitation direction $`\mathbf{Q}`$ as $`\mathbf{V}_p = (\mathbf{V}_{curr} \cdot \mathbf{Q}) \cdot \mathbf{Q}`$, where $`\mathbf{V}_{p}`$ and $`\mathbf{V}_{curr}`$ the $`3N$-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
 
 $$
 E_k = \frac{1}{2} \mathbf{V}_{p}^T \mathbf{M}\ \mathbf{V}_p
 $$
 
-where $\mathbf{M}$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $\mathbf{V}_{new} = \mathbf{V}_{curr} + (\mathbf{V}_{exc} - \mathbf{V}_{p})$.
+where $`\mathbf{M}`$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $`\mathbf{V}_{new} = \mathbf{V}_{curr} + (\mathbf{V}_{exc} - \mathbf{V}_{p})`$.
 
 With this procedure, the system is kept in a continuous excited state, allowing an effective small, "adiabatic-like" energy injection. The energy injection control is done by projecting the velocities computed during the simulation onto the excited vector, thus obtaining and rescaling the kinetic energy corresponding to it.
 
 ## Excitation Direction Update
 Since the excitation vector is obtained from the initial conformation, it is dependent of this configuration. As the system is displaced along this direction and change its conformation, the motion loses its directionality due to mainly anharmonic effects. To prevent the structural distortions produced by the displacement along a vector that is no longer valid, the program update the excitation directions based on the trajectory evolution during the previous excitation steps. This procedure allows the system to adaptively find a relaxed path to follow during the next aMDeNM excitations.
 
-If we consider the $n^{th}$ simulation, the next excitation vector, $\mathbf{Q}_{n+1}$, is determined based on specific parameter values obtained along the trajectory followed in the $\mathbf{Q}_n$ direction. A new excitation vector is defined based on two parameters: the first relates to the effective displacement $\ell$ along $\mathbf{Q}_n$ during the $n^{th}$ excited dynamics by projecting the mass-weighted effective displacement vector $\mathbf{d}_n = \mathbf{M}^{1/2} ({\langle \mathbf{r} \rangle}_n - \mathbf{r}_n^0)$ onto the normalized mass-weighted excitation vector $\mathbf{Q}_n$, where the ${\langle \mathbf{r} \rangle}_n$ is the average position of the structures over the last $0.2 ps$ obtained in the $n^{th}$ excitation, and $\mathbf{r}_n^0$ is the starting position for the following simulation.
+If we consider the $`n^{th}`$ simulation, the next excitation vector, $`\mathbf{Q}_{n+1}`$, is determined based on specific parameter values obtained along the trajectory followed in the $`\mathbf{Q}_n`$ direction. A new excitation vector is defined based on two parameters: the first relates to the effective displacement $`\ell`$ along $`\mathbf{Q}_n`$ during the $`n^{th}`$ excited dynamics by projecting the mass-weighted effective displacement vector $`\mathbf{d}_n = \mathbf{M}^{1/2} ({\langle \mathbf{r} \rangle}_n - \mathbf{r}_n^0)`$ onto the normalized mass-weighted excitation vector $`\mathbf{Q}_n`$, where the $`{\langle \mathbf{r} \rangle}_n`$ is the average position of the structures over the last $`0.2~ps`$ obtained in the $`n^{th}`$ excitation, and $`\mathbf{r}_n^0`$ is the starting position for the following simulation.
 
-The second parameter relates to the relative deviation of the vector $\mathbf{d}_n$ with respect to vector $\mathbf{Q}_n$, evaluated by the angle $\alpha_n$ between them. More precisely, we consider the ${\cos \alpha}_n$ obtained by taking the scalar product of these vectors after normalizing $\mathbf{d}_n$, as following:
+The second parameter relates to the relative deviation of the vector $`\mathbf{d}_n`$ with respect to vector $`\mathbf{Q}_n`$, evaluated by the angle $`\alpha_n`$ between them. More precisely, we consider the $`{\cos \alpha}_n`$ obtained by taking the scalar product of these vectors after normalizing $`\mathbf{d}_n`$, as following:
 
 $$
 {\cos \alpha}_n = \frac {\mathbf{d}_n \mathbf{Q}_n} {\|\mathbf{d}_n\|}
 $$
 
-A precise rule is followed to decide whether to modify the excitation vector direction after every short simulation run. The excitation vector is changed as soon as $\ell_n$, the displacement along $\mathbf{Q}_n$, is larger than a threshold value $\ell_c$, and when $\cos {\alpha}$ is lower than a threshold value ${\cos \alpha}_c$. The conditions for choosing the excitation vector between $\mathbf{d}_n$ and $\mathbf{Q}_n$ for the next simulation are defined by:
+A precise rule is followed to decide whether to modify the excitation vector direction after every short simulation run. The excitation vector is changed as soon as $`\ell_n`$, the displacement along $`\mathbf{Q}_n`$, is larger than a threshold value $`\ell_c`$, and when $`\cos {\alpha}`$ is lower than a threshold value $`{\cos \alpha}_c`$. The conditions for choosing the excitation vector between $`\mathbf{d}_n`$ and $`\mathbf{Q}_n`$ for the next simulation are defined by:
 
 $$
 \mathbf{Q}_{n+1} = \begin{cases}
@@ -269,7 +274,7 @@ $$
 \end{cases}
 $$
 
-The default value for $\ell_c$ is $0.5 m^{1/2} Å$ (with $m$ being atomic mass unit), and for $\alpha$ is $60°$.
+The default value for $`\ell_c`$ is $`0.5 m^{1/2} Å`$ (with $`m`$ being atomic mass unit), and for $`\alpha`$ is $`60°`$.
 
 [Back to top ↩](#)
 * ****
@@ -284,33 +289,45 @@ Uses simpified force-field based on particles and springs computed automatically
 Uses physical force-field based normal modes computed in *[CHARMM](https://www.charmm.org/charmm/)*. A given normal mode (or a linear combination of several modes) is used to excite the system during the molecular dyamics simulation.
 
 # Configuration
-**pyadmd** is distributed as an installable Python package that computes ENM modes, uniformly distributes linear combinations of modes in the $N$-dimensional hypersphere space, manages the OpenMM-based simulations, and computes the projections along the excitation direction, applying corrections whenever necessary. Its bundled data includes the CHARMM driver script used to write down CHARMM-computed normal modes.
+**pyadmd** is distributed as an installable Python package that computes ENM modes, uniformly distributes linear combinations of modes in the $`N$-dimensional hypersphere space, manages the OpenMM-based simulations, and computes the projections along the excitation direction, applying corrections whenever necessary. Its bundled data includes the CHARMM driver script used to write down CHARMM-computed normal modes.
 
 One can easily setup and run an Adaptive MDeNM simulation using pyadmd.
 The configuration process is straightforward. Some technical aspects will be covered in this section in order to facilitate the method comprehension.
 
 ## Energy injection
-The excitation time of Adaptive MDeNM is $0.2 ps$. This means that every $0.2 ps$ the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of $0.125 kcal/mol$ is sufficient to achieve a large exploration of the conformational space ($0.5 kcal/mol$ if Cα-only ENM).
+The excitation time of Adaptive MDeNM is $`0.2~ps`$. This means that every $`0.2~ps`$ the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of $`2~kcal/mol`$ is sufficient to achieve a large exploration of the conformational space ($5~kcal/mol`$ if Cα-only ENM).
 
 ## Simulation time
 The total simulation time may require a tuning depending on the system size, energy injection and nature of the motion being excited. Considering a large scale global motion, there is a trade-off between the energy injection and the total simulation time. Larger amounts of energy allows a shorter simulation time, however, this may not be advised as discussed above.
 
 ## Excitation direction update
-As described above, the direction is updated after the system has traveled a distance of $0.5 Å$ along the excitation vector and its real displacement has a deviation of $60°$ with respect to the theoretical one. The update can also be affected by the amount of energy injected, since higher energy values leads to larger motions. In addition, after each correction the new vector loses directionality due to anharmonic effects. This means that, at a given point, the new vectors are so diffuse that there is no point in proceed the simulation. When this ponit is reached, it is necessary to recompute the normal modes and start again. This is one more reason to not inject high energy values and let the system undergoes the changes slowly.
+As described above, the direction is updated after the system has traveled a distance of $`0.5~Å`$ along the excitation vector and its real displacement has a deviation of $`60°`$ with respect to the theoretical one. The update can also be affected by the amount of energy injected, since higher energy values leads to larger motions. In addition, after each correction the new vector loses directionality due to anharmonic effects. This means that, at a given point, the new vectors are so diffuse that there is no point in proceed the simulation. When this ponit is reached, it is necessary to recompute the normal modes and start again. This is one more reason to not inject high energy values and let the system undergoes the changes slowly.
 Alternatively, one can recompute ENM modes instead of change the excitation vector direction (only when the original model type is ENM).
 
 ## Number of modes and replicas
 The program do a linear combination of the supplied normal modes to compute the excitation direction. This imply that the more modes are provided, the more replicas will be necessary to cover the hyperspace described by these modes.
 
 ## Atom selection
-Create an atom selection to apply the energy injection using *[MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html)*. Must be written between quotes.
-
-[Back to top ↩](#)
-* ****
+Create an atom selection to apply the energy injection using *[MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html)*. Must be written between quotes. This same selection (`-sel`/`--selection` at `run` time) is later reused by `pyadmd analyze` as the default scope for most structural metrics — see [Analysis Selection Scope](#analysis-selection-scope).
 
 # Input Requirements
 
 ## Run
+### Parameters
+- **`-src`/`--source`**: Input engine type, **`NAMD`** (binary `.coor`/`.vel`/`.xsc`) or **`OPENMM`** (XML restart `.rst`) (**required**)
+
+- **`-m`/`--model`**: Normal modes model type, **`CA`** ENM, **`HEAVY`** Atoms ENM or **`CHARMM`** (**required**. Default: **`CA`**)
+
+- **`-nm`/`--modes`**: Normal modes to excite (**optional**. Default: **`7,8,9`**)
+
+- **`-ek`/`--energy`**: Excitation energy injection (**optional**. Default: **`2`** kcal/mol)
+
+- **`-t`/`--time`**: Simulation time (**optional**. Default: **`250`** ps)
+
+- **`-sel`/`--selection`**: Atom selection to apply the energy injection (**optional**. Default: **`"protein"`**). Also becomes the default scope for most `pyadmd analyze` structural metrics — see [Analysis Selection Scope](#analysis-selection-scope).
+
+- **`-rep`/`--replicas`**: Number of replicas to run (**optional**. Default: **`10`**)
+
 ### Files
 `pyadmd run` automatically creates the `inputs/` directory in the current
 working directory (if it doesn't already exist) and copies every file listed
@@ -331,21 +348,6 @@ below into it.
 **OpenMM input files** (**required when `-src OPENMM`**):
 - **`-rst`/`--rstfile`**: OpenMM XML restart file (`.rst`), written via `XmlSerializer.serialize(state)` from a state built with `getPositions=True, getVelocities=True`
 
-### Parameters
-- **`-src`/`--source`**: Input engine type, **`NAMD`** (binary `.coor`/`.vel`/`.xsc`) or **`OPENMM`** (XML restart `.rst`) (**required**)
-
-- **`-m`/`--model`**: Normal modes model type, **`CA`** ENM, **`HEAVY`** Atoms ENM or **`CHARMM`** (**required**. Default: **`CA`**)
-
-- **`-nm`/`--modes`**: Normal modes to excite (**optional**. Default: **`7,8,9`**)
-
-- **`-ek`/`--energy`**: Excitation energy injection (**optional**. Default: **`0.125`** kcal/mol)
-
-- **`-t`/`--time`**: Simulation time (**optional**. Default: **`250`** ps)
-
-- **`-sel`/`--selection`**: Atom selection to apply the energy injection (**optional**. Default: **`"protein"`**)
-
-- **`-rep`/`--replicas`**: Number of replicas to run (**optional**. Default: **`10`**)
-
 ### Feature Flags
 - **`-n`/`--no_correc`**: Disable excitation vector direction correction and compute standard MDeNM
 
@@ -359,9 +361,24 @@ below into it.
 ### Parameters
 - **`-t`/`--time`**: Simulation time to append, in ps (**required**)
 
+## Free Energy
+All parameters are optional; the `fel` subcommand reads its input trajectories and reference state from files already produced by `run`/`restart`/`append`, so no additional files need to be supplied.
+
+- **`-c`/`--cutoff`**: GROMOS RMSD clustering cutoff, in Å (**optional**. Default: **`0.8`**)
+- **`-d`/`--deexcite`**: Total restrained de-excitation MD length per centroid, in ps, split evenly over 4 restraint phases (**optional**. Default: **`200`**)
+- **`-p`/`--production`**: Unrestrained production MD length per centroid, in ps (**optional**. Default: **`800`**)
+- **`-nm`/`--modes`**: Comma-separated mode indices to project for the FEL (**optional**. Default: same modes used in `run`, *e.g.* `7,8,9`)
+- **`--modes_2d`**: Mode pairs for 2D FEL plots, as space-separated `"m1,m2"` tokens, *e.g.* `"7,8 7,9 8,9"` (**optional**. Default: all pairwise combinations of `--modes`)
+- **`-b`/`--bins`**: Number of histogram bins used for the FEL (**optional**. Default: **`50`**)
+- **`-T`/`--temp`**: Temperature for k<sub>B</sub>T scaling and the production ensemble, in K (**optional**. Default: **`303.15`**)
+- **`-s`/`--sel`**: MDAnalysis selection string used for GROMOS RMSD clustering (**optional**. Default: **`"protein and name CA"`**)
+- **`--max_centroids`**: Maximum number of centroids submitted to MD. When the cluster count exceeds this value, exactly this many centroids are selected by greedy farthest-point (MaxMin) sampling to maximize conformational diversity (**optional**. Default: **`50`**)
+
+**Note:** `-s`/`--sel` and `-T`/`--temp` must stay the same across repeated `fel` calls on the same simulation — see [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation). This `-s`/`--sel` selection is independent of `run`'s `-sel`/`--selection`: it controls GROMOS clustering only, while `run`'s selection controls both energy injection and (by default) the scope of most `pyadmd analyze` metrics — see [Analysis Selection Scope](#analysis-selection-scope).
+
 ## Analysis
 ### Parameters
-- **`-src`/`--source`**: Trajectory source to analyze, **`pyadmd`** for `rep{N}.dcd` replica trajectories or **`freeenergy`** for centroid production trajectories from a completed `freeenergy` run (**optional**. Default: **`pyadmd`**)
+- **`-src`/`--source`**: Trajectory source to analyze, **`pyadmd`** for `rep{N}.dcd` replica trajectories or **`fel`** for `centroid_frame{F}.dcd` production trajectories  (**optional**. Default: **`pyadmd`**)
 
 ### Feature Flags
 - **`-r`/`--rough`**: Perform rough analysis (**optional**. Analyze every **`5`** ps instead of every frame.)
@@ -371,196 +388,29 @@ Each analysis step can be independently disabled. When skipped, that metric will
 
 - **`--no_rmsd`**: Skip RMSD calculation
 - **`--no_rg`**: Skip radius of gyration calculation
-- **`--no_sasa`**: Skip SASA calculation
-- **`--no_hp`**: Skip hydrophobic exposure calculation
+- **`--no_sasa`**: Skip SASA and hydrophobic exposure calculation
 - **`--no_rmsf`**: Skip  RMSF calculation
 - **`--no_dssp`**: Skip secondary structure analysis via DSSP
 - **`--no_dccm`**: Skip dCCM (dynamic cross-correlation matrix) calculation
 - **`--no_lmi`**: Skip LMI (Linear Mutual Information) calculation
 
-**Note:** Before any analysis runs, the program checks if `pyadmd` or `freeenergy` calls are properly completed. If any unit hasn't reached its target, `analyze` aborts and lists the incomplete units rather than analyzing a partial trajectory. Complete them first with `restart`/`append` (pyadmd) or a further `freeenergy` call (freeenergy), then re-run `analyze`.
-
-## Free Energy
-All parameters are optional; the `freeenergy` subcommand reads its input trajectories and reference state from files already produced by `run`/`restart`/`append`, so no additional files need to be supplied.
-
-- **`-c`/`--cutoff`**: GROMOS RMSD clustering cutoff, in Å (**optional**. Default: **`0.8`**)
-- **`-d`/`--deexcite`**: Total restrained de-excitation MD length per centroid, in ps, split evenly over 4 restraint phases (**optional**. Default: **`200`**)
-- **`-p`/`--production`**: Unrestrained production MD length per centroid, in ps (**optional**. Default: **`800`**)
-- **`-nm`/`--modes`**: Comma-separated mode indices to project for the FEL (**optional**. Default: same modes used in `run`, e.g. `7,8,9`)
-- **`--modes_2d`**: Mode pairs for 2D FEL plots, as space-separated `"m1,m2"` tokens, e.g. `"7,8 7,9 8,9"` (**optional**. Default: all pairwise combinations of `--modes`)
-- **`-b`/`--bins`**: Number of histogram bins used for the FEL (**optional**. Default: **`50`**)
-- **`-T`/`--temp`**: Temperature for k<sub>B</sub>T scaling and the production ensemble, in K (**optional**. Default: **`303.15`**)
-- **`-s`/`--sel`**: MDAnalysis selection string used for GROMOS RMSD clustering (**optional**. Default: **`"protein and name CA"`**)
-- **`--max_centroids`**: Maximum number of centroids submitted to MD. When the cluster count exceeds this value, exactly this many centroids are selected by greedy farthest-point (MaxMin) sampling to maximize conformational diversity (**optional**. Default: **`50`**)
-
-**Note:** `-s`/`--sel` and `-T`/`--temp` must stay the same across repeated `freeenergy` calls on the same simulation — see [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation).
-
-[Back to top ↩](#)
-* ****
-
-# Analysis
-The PyAdMD **`analysis`** module provides comprehensive analysis capabilities for molecular dynamics simulations performed using the aMDeNM method. This module processes simulation trajectories and generates detailed structural analysis, visualizations, and summary reports. It can analyze either the aMDeNM replica trajectories from `run`/`restart`/`append` (`-src pyadmd`, default) or the centroid production trajectories from a completed `freeenergy` run (`-src freeenergy`) — see [Trajectory Source](#trajectory-source).
-
-## Basic Structural Properties Calculated
-
-1. **Root Mean Square Deviation (RMSD):**  Measures structural deviation from the initial conformation.
-
-2. **Radius of Gyration (RoG):** Measures the compactness of the protein structure. Useful for identifying folding/unfolding events.
-
-3. **Solvent Accessible Surface Area (SASA):** Calculates the surface area accessible to solvent molecules. Uses the Shrake-Rupley algorithm implemented in Bio.PDB.
-
-4. **Hydrophobic Exposure:** Measures the percentage of hydrophobic residues exposed to solvent. Useful for identifying folding/unfolding events.
-
-5. **Root Mean Square Fluctuation (RMSF):** Calculates per-residue flexibility using Cα atoms. Identifies flexible and rigid regions in the protein structure.
-
-6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
-
-7. **Dynamic Cross-Correlation Matrix (dCCM):** Measures pairwise linear correlation of Cα residue motions after Kabsch superposition to remove rigid-body rotation/translation. Values range from +1 (fully correlated motion) through 0 (uncorrelated) to −1 (fully anti-correlated motion), useful for identifying coupled domains, allosteric communication paths, and correlated/anti-correlated collective motions.
-
-8. **Linear Mutual Information (LMI):** An alternative, signless measure of residue-residue coupling strength (range [0, 1]) computed via the Gaussian approximation of generalized correlation. Unlike dCCM, LMI reports strongly anti-correlated motion with the same high value as strongly correlated motion, since it measures total coupling rather than its direction.
-
-## Analysis Modes
-### Standard Analysis
-- Analyzes every frame of the trajectory
-- Provides the highest resolution data
-- May be computationally intensive
-
-### Rough Analysis
-- Analyzes frames at *5ps* intervals
-- Significantly reduces computation time
-- Suitable for quick overviews or large systems
-
-### Selective Analysis (Skip Flags)
-Individual analyses can be disabled at the command line. This is useful when:
-- DSSP is not installed (`--no_dssp`)
-- Only a subset of metrics is needed (e.g. RMSD + RMSF only)
-- Computation time needs to be minimized (SASA, DSSP, and LMI are the most expensive steps; LMI scales as O(n<sub>Cα</sub><sup>2</sup>) with a pairwise covariance computation)
-
-## Trajectory Source
-The `-src`/`--source` flag selects which set of trajectories to analyze:
-
-- **`pyadmd`** (default): analyzes `rep{N}/rep{N}.dcd` replica trajectories, one analysis unit per replica. Output goes to `analysis/`.
-- **`freeenergy`**: analyzes `freeenergy/centroids/centroid_frame{F}/prod.dcd` production trajectories, one analysis unit per centroid (identified by its merged-trajectory frame index, not a sequential number). Output goes to `analysis/freeenergy/`, kept separate from `pyadmd`-sourced output. All computed metrics (RMSD, RoG, SASA, hydrophobic exposure, RMSF, secondary structure) and skip flags apply identically regardless of source.
-
-In both modes, `analyze` first verifies every unit has reached its target cycle count and aborts if not — see the [Analysis](#analysis) input requirements note above.
-
-## Configuration Parameters
-The analysis module reads simulation parameters from the `pyAdMD_params.json` file, which includes:
-
-- Number of replicas
-- Total simulation time
-- Atom selection criteria
-- Input file paths
-
-When `-src freeenergy` is used, the shared production time axis (applied uniformly across all centroids) is instead read from `freeenergy/run_metadata.json`'s `production_ps` value; `pyAdMD_params.json` is still used to locate the shared PSF topology file.
-
-## Output Structure
-### Directory Organization
-```
-analysis/
-├── analysis_results.csv                # Combined analysis data from all replicas
-├── rmsf.csv                            # Combined RMSF data (omitted with --no_rmsf)
-├── analysis_summary.html               # HTML summary report
-├── rmsd_plot.png                       # RMSD plot (omitted with --no_rmsd)
-├── radius_gyration_plot.png            # Radius of gyration plot (omitted with --no_rg)
-├── sasa_plot.png                       # SASA plot (omitted with --no_sasa)
-├── hydrophobic_exposure_plot.png       # Hydrophobic exposure plot (omitted with --no_hp)
-├── rmsf_average.png                    # Average RMSF plot (omitted with --no_rmsf)
-├── secondary_structure_average.png     # Average secondary structure plot (omitted with --no_dssp)
-├── dccm_average.png                    # Average dCCM heatmap (omitted with --no_dccm)
-├── dccm_average.npy                    # Average dCCM matrix, raw (omitted with --no_dccm)
-├── lmi_average.png                     # Average LMI heatmap (omitted with --no_lmi)
-├── lmi_average.npy                     # Average LMI matrix, raw (omitted with --no_lmi)
-└── rep[1-N]/                           # Replica-specific directories
-    ├── analysis_results.csv            # Replica-specific analysis data
-    ├── rmsf.csv                        # Replica-specific RMSF data (omitted with --no_rmsf)
-    ├── rmsd_plot.png                   # Replica-specific RMSD plot (omitted with --no_rmsd)
-    ├── radius_gyration_plot.png        # Replica-specific RoG plot (omitted with --no_rg)
-    ├── sasa_plot.png                   # Replica-specific SASA plot (omitted with --no_sasa)
-    ├── hydrophobic_exposure_plot.png   # Replica-specific hydrophobic exposure plot (omitted with --no_hp)
-    ├── rmsf_plot.png                   # Replica-specific RMSF plot (omitted with --no_rmsf)
-    ├── secondary_structure.png         # Replica-specific secondary structure plot (omitted with --no_dssp)
-    ├── dccm_matrix.npy                 # Replica-specific dCCM matrix, raw (omitted with --no_dccm)
-    ├── dccm_plot.png                   # Replica-specific dCCM heatmap (omitted with --no_dccm)
-    ├── lmi_matrix.npy                  # Replica-specific LMI matrix, raw (omitted with --no_lmi)
-    └── lmi_plot.png                    # Replica-specific LMI heatmap (omitted with --no_lmi)
-```
-
-With `-src freeenergy`, the same set of files is written under `analysis/freeenergy/` instead, with one subdirectory per centroid (named by frame index, mirroring `freeenergy/centroids/centroid_frame[F]/`) in place of `rep[1-N]/`:
-```
-analysis/freeenergy/
-├── analysis_results.csv                # Combined analysis data from all centroids
-├── rmsf.csv                            # Combined RMSF data (omitted with --no_rmsf)
-├── analysis_summary.html               # HTML summary report
-├── rmsd_plot.png                       # RMSD plot (omitted with --no_rmsd)
-├── radius_gyration_plot.png            # Radius of gyration plot (omitted with --no_rg)
-├── sasa_plot.png                       # SASA plot (omitted with --no_sasa)
-├── hydrophobic_exposure_plot.png       # Hydrophobic exposure plot (omitted with --no_hp)
-├── rmsf_average.png                    # Average RMSF plot (omitted with --no_rmsf)
-├── secondary_structure_average.png     # Average secondary structure plot (omitted with --no_dssp)
-├── dccm_average.png                    # Average dCCM heatmap (omitted with --no_dccm)
-├── dccm_average.npy                    # Average dCCM matrix, raw (omitted with --no_dccm)
-├── lmi_average.png                     # Average LMI heatmap (omitted with --no_lmi)
-├── lmi_average.npy                     # Average LMI matrix, raw (omitted with --no_lmi)
-└── centroid_frame[F]/                  # Centroid-specific directories
-    ├── analysis_results.csv            # Centroid-specific analysis data
-    ├── rmsf.csv                        # Centroid-specific RMSF data (omitted with --no_rmsf)
-    ├── rmsd_plot.png                   # Centroid-specific RMSD plot (omitted with --no_rmsd)
-    ├── radius_gyration_plot.png        # Centroid-specific RoG plot (omitted with --no_rg)
-    ├── sasa_plot.png                   # Centroid-specific SASA plot (omitted with --no_sasa)
-    ├── hydrophobic_exposure_plot.png   # Centroid-specific hydrophobic exposure plot (omitted with --no_hp)
-    ├── rmsf_plot.png                   # Centroid-specific RMSF plot (omitted with --no_rmsf)
-    ├── secondary_structure.png         # Centroid-specific secondary structure plot (omitted with --no_dssp)
-    ├── dccm_matrix.npy                 # Centroid-specific dCCM matrix, raw (omitted with --no_dccm)
-    ├── dccm_plot.png                   # Centroid-specific dCCM heatmap (omitted with --no_dccm)
-    ├── lmi_matrix.npy                  # Centroid-specific LMI matrix, raw (omitted with --no_lmi)
-    └── lmi_plot.png                    # Centroid-specific LMI heatmap (omitted with --no_lmi)
-```
-
-## Output Files Description
-1. **CSV Files**
-- **`analysis_results.csv`:** Time-series data for RMSD, RoG, SASA, hydrophobic exposure, and secondary structure content
-- **`rmsf.csv`:** Per-residue RMSF values for all analyzed units (all replicas, or all centroids with `-src freeenergy`)
-
-2. **Plot Files**
-- Individual property plots for each unit (replica, or centroid with `-src freeenergy`)
-- Combined plots showing all units
-- Average plots across all units
-
-3. **Correlation Matrix Files**
-- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) dCCM matrix, values in [-1, 1]. Omitted with `--no_dccm`.
-- **`dccm_plot.png`** / **`dccm_average.png`**: dCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
-- **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in [0, 1]. Omitted with `--no_lmi`.
-- **`lmi_plot.png`** / **`lmi_average.png`**: LMI heatmap, sequential colormap (LMI has no sign).
-
-4. **HTML Summary**
-- Interactive summary report with tables and embedded plots
-- Statistics for each unit and averages across all units
-- Easy navigation and visualization of results
-
-
-Furthermore, some basic analyses are written inside each replica folder at the end of the simulation, they can be found as follows:
-
-- **coor-proj.out:** projection of the MD coordinates onto the normal mode space described by the excitation vector
-- **rms-proj.out:** the system RMSD displacement along the excitation vectors
-- **vp-proj.out:** projection of the MD velocities onto the normal mode space described by the excitation vector
-- **ek-proj.out:** displays the additional kinetic energy at each MD step
+**Note:** Before analysis, the program checks if `pyadmd` or `fel` calls are properly completed. If any unit (pyAdMD replica or free energy centroid) hasn't finished running, `analyze` prints a warning listing the incomplete units and their cycles completed/target, but proceeds anyway — see [Handling Incomplete Units](#handling-incomplete-units) below.
 
 [Back to top ↩](#)
 * ****
 
 # Free Energy Landscape
-The **`freeenergy`** subcommand computes a free energy landscape (FEL) from a completed set of aMDeNM replicas, following the two-stage protocol of [Costa *et al.*](https://doi.org/10.1021/acs.jctc.5b00003).
+The **`fel`** subcommand computes a free energy landscape (FEL) from a completed set of aMDeNM replicas, following the two-stage protocol of [Costa *et al.*](https://doi.org/10.1021/acs.jctc.5b00003).
 
 ## Method Overview
 1. **Merge trajectories**: all `rep*.dcd` replica trajectories are concatenated into a single pseudo-trajectory.
 2. **GROMOS clustering**: frames are clustered by Cα RMSD (`-s`/`-c`); when the number of clusters exceeds `--max_centroids`, a maximally diverse subset is selected via greedy farthest-point (MaxMin) sampling on the cluster centroids.
 3. **Centroid MD**: each centroid undergoes a 4-phase restrained de-excitation (`-d`, progressively decreasing positional restraints on backbone and sidechain heavy atoms) followed by unrestrained production MD (`-p`).
 4. **Mode projection**: every production frame is projected onto each individual normal mode vector as a signed mass-weighted RMS displacement.
-5. **FEL computation**: a population histogram (`-b` bins) is converted to $\Delta G$ via $\Delta G = -k_{BT} \cdot ln[P(q)/P_{max}]$, computed independently per mode (1D) and for user-specified mode pairs (2D, `--modes_2d`).
+5. **FEL computation**: a population histogram (`-b` bins) is converted to $`\Delta G`$ via $`\Delta G = -k_{BT} \cdot ln[P(q)/P_{max}]`$, computed independently per mode (1D) and for user-specified mode pairs (2D, `--modes_2d`).
 
 ## Extending a Previous Free Energy Calculation
-`freeenergy` can be re-invoked on the same simulation with a larger `--max_centroids` and/or longer `-p`/`--production` to extend an earlier calculation, rather than starting over:
+`fel` can be re-invoked on the same simulation with a larger `--max_centroids` and/or longer `-p`/`--production` to extend an earlier calculation, rather than starting over:
 
 - **Free to change**: `-c`/`--cutoff` and `-d`/`--deexcite`. Changing the cutoff only affects the re-thresholding of the cached pairwise-RMSD matrix. Changing the de-excitation length only affects newly-created centroids going forward; existing centroids keep whatever de-excitation they originally had and are simply extended in production.
 - **Must stay the same**: `-s`/`--sel`, `-T`/`--temp`. Mixing clustering selections or temperatures inside one pooled FEL is not physically valid.
@@ -570,7 +420,7 @@ The **`freeenergy`** subcommand computes a free energy landscape (FEL) from a co
 ## Output Structure
 ### Directory Organization
 ```
-freeenergy/
+fel/
 ├── run_metadata.json                       # parameters used (gates append behavior)
 ├── clustering_rmsd_cache.npz               # cached pairwise-RMSD matrix (reused across calls)
 ├── clustering_rmsd_cache.json              # cache validity metadata (selection, frame count, stride)
@@ -601,8 +451,137 @@ freeenergy/
 [Back to top ↩](#)
 * ****
 
+# Analysis
+The PyAdMD **`analysis`** module provides comprehensive analysis capabilities for molecular dynamics simulations performed using the aMDeNM method. This module processes simulation trajectories and generates detailed structural analysis, visualizations, and summary reports. It can analyze either the aMDeNM replica trajectories from `run`/`restart`/`append` (`-src pyadmd`, default) or the centroid production trajectories from a completed `fel` run (`-src fel`) — see [Trajectory Source](#trajectory-source).
+
+## Basic Structural Properties Calculated
+
+1. **Root Mean Square Deviation (RMSD):**  Measures structural deviation from the initial conformation.
+
+2. **Radius of Gyration (RoG):** Measures the compactness of the protein structure. Useful for identifying folding/unfolding events.
+
+3. **Solvent Accessible Surface Area (SASA):** Calculates the surface area accessible to solvent molecules.
+
+4. **Hydrophobic Exposure:** Solvent-accessible surface area (SASA, Å²) contributed by hydrophobic residues (ALA, VAL, LEU, ILE, MET, PHE, TRP, PRO). Useful for identifying folding/unfolding events: buried hydrophobic patches becoming solvent-exposed (or vice versa) is a hallmark of such transitions.
+
+5. **Root Mean Square Fluctuation (RMSF):** Calculates per-residue flexibility using Cα atoms. Identifies flexible and rigid regions in the protein structure.
+
+6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
+
+7. **Dynamic Cross-Correlation Matrix (dCCM):** Measures pairwise linear correlation of Cα residue motions after Kabsch superposition to remove rigid-body rotation/translation. Values range from +1 (fully correlated motion) through 0 (uncorrelated) to −1 (fully anti-correlated motion), useful for identifying coupled domains, allosteric communication paths, and correlated/anti-correlated collective motions.
+
+8. **Linear Mutual Information (LMI):** An alternative, signless measure of residue-residue coupling strength (range [0, 1]) computed via the Gaussian approximation of generalized correlation. Unlike dCCM, LMI reports strongly anti-correlated motion with the same high value as strongly correlated motion, since it measures total coupling rather than its direction.
+
+## Analysis Modes
+### Standard Analysis
+- Analyzes every frame of the trajectory
+- Provides the highest resolution data
+- May be computationally intensive
+
+### Rough Analysis
+- Analyzes frames at *5ps* intervals
+- Significantly reduces computation time
+- Suitable for quick overviews or large systems
+
+### Selective Analysis (Skip Flags)
+Individual analyses can be disabled at the command line. This is useful when:
+- DSSP is not installed (avoid exception error)
+- Only a subset of metrics is needed (*e.g.* RMSD + RMSF only)
+- Computation time needs to be minimized (SASA, DSSP, and LMI are the most expensive steps; LMI scales as O(n<sub>Cα</sub><sup>2</sup>) with a pairwise covariance computation)
+
+## Trajectory Source
+The `-src`/`--source` flag selects which set of trajectories to analyze:
+
+- **`pyadmd`**: analyzes `rep{N}/rep{N}.dcd` replica trajectories, one analysis unit per replica. Output goes to `analysis/` (default).
+- **`fel`**: analyzes `fel/centroids/centroid_frame{F}/prod.dcd` production trajectories, one analysis unit per centroid (identified by its merged-trajectory frame index, not a sequential number). Output goes to `analysis/fel/`, kept separate from `pyadmd`-sourced output. All computed metrics (RMSD, RoG, SASA, hydrophobic exposure, RMSF, secondary structure) and skip flags apply identically regardless of source.
+
+In both modes, `analyze` proceeds even if some units haven't finished — see [Handling Incomplete Units](#handling-incomplete-units) below.
+
+## Handling Incomplete Units
+Before any analysis runs, the program checks whether every unit (replica or centroid) has finished running. Units that haven't are **not** excluded: they're analyzed using only the cycles they actually completed, with a correctly-scaled time axis reflecting their real elapsed simulation time rather than the run's target time. A console warning lists every incomplete unit (cycles completed/target), and the same information appears in `analysis_summary.html` under an "Incomplete Units" section.
+
+This means `analyze` always produces a result, even against a still-running or partially-crashed simulation. If you want a fully completed dataset instead, finish the incomplete units first — `restart`/`append` for `-src pyadmd`, or a further `fel` call for `-src fel` — then re-run `analyze`.
+
+The analysis pipeline is also resilient to being interrupted itself: each unit's results are written to its own output directory as soon as that unit finishes, and a re-run of `analyze` automatically detects and skips units whose output is already complete, only (re)computing what's missing. Parallel workers are recycled after each unit to keep memory bounded across large batches (*e.g.* hundreds of `fel` centroids).
+
+## Configuration Parameters
+The analysis module reads simulation parameters from the `pyAdMD_params.json` file, which includes:
+
+- Number of replicas
+- Total simulation time
+- Atom selection criteria (used to scope RMSD/RoG/SASA/hydrophobic-exposure/DSSP — see [Analysis Selection Scope](#analysis-selection-scope))
+- Input file paths
+
+When `-src fel` is used, the shared production time axis (applied uniformly across all centroids) is instead read from `fel/run_metadata.json`'s `production_ps` value; `pyAdMD_params.json` is still used to locate the shared PSF topology file and the analysis selection.
+
+## Output Structure
+### Directory Organization
+```
+analysis/{fel/}
+├── analysis_results.csv                  # Combined analysis data from all units
+├── rmsf.csv                              # Combined RMSF data (omitted with --no_rmsf)
+├── analysis_summary.html                 # HTML summary report
+├── rmsd_plot.png                         # RMSD plot (omitted with --no_rmsd)
+├── radius_gyration_plot.png              # Radius of gyration plot (omitted with --no_rg)
+├── sasa_plot.png                         # SASA plot (omitted with --no_sasa)
+├── hydrophobic_exposure_plot.png         # Hydrophobic exposure plot (omitted with --no_sasa)
+├── rmsf_average.png                      # Average RMSF plot (omitted with --no_rmsf)
+├── secondary_structure_average.png       # Average secondary structure plot (omitted with --no_dssp)
+├── dccm_average.png                      # Average dCCM heatmap (omitted with --no_dccm)
+├── dccm_average.npy                      # Average dCCM matrix, raw (omitted with --no_dccm)
+├── lmi_average.png                       # Average LMI heatmap (omitted with --no_lmi)
+├── lmi_average.npy                       # Average LMI matrix, raw (omitted with --no_lmi)
+└── {rep[1-N]}/ or {centroid_frame[F]}/   # Unit-specific directories
+    ├── analysis_results.csv              # Unit-specific analysis data
+    ├── rmsf.csv                          # Unit-specific RMSF data (omitted with --no_rmsf)
+    ├── rmsd_plot.png                     # Unit-specific RMSD plot (omitted with --no_rmsd)
+    ├── radius_gyration_plot.png          # Unit-specific RoG plot (omitted with --no_rg)
+    ├── sasa_plot.png                     # Unit-specific SASA plot (omitted with --no_sasa)
+    ├── hydrophobic_exposure_plot.png     # Unit-specific hydrophobic exposure plot (omitted with --no_sasa)
+    ├── rmsf_plot.png                     # Unit-specific RMSF plot (omitted with --no_rmsf)
+    ├── secondary_structure.png           # Unit-specific secondary structure plot (omitted with --no_dssp)
+    ├── dccm_matrix.npy                   # Unit-specific dCCM matrix, raw (omitted with --no_dccm)
+    ├── dccm_plot.png                     # Unit-specific dCCM heatmap (omitted with --no_dccm)
+    ├── lmi_matrix.npy                    # Unit-specific LMI matrix, raw (omitted with --no_lmi)
+    └── lmi_plot.png                      # Unit-specific LMI heatmap (omitted with --no_lmi)
+```
+**Note:** With `-src fel`, the same set of files is written under `analysis/fel/` instead, with one subdirectory per centroid (named by frame index, mirroring `fel/centroids/centroid_frame[F]/`) in place of `rep[1-N]/`.
+
+## Output Files Description
+1. **CSV Files**
+- **`analysis_results.csv`:** Time-series data for RMSD, RoG, SASA, hydrophobic exposure, and secondary structure content
+- **`rmsf.csv`:** Per-residue RMSF values for all analyzed units (all replicas, or all centroids with `-src fel`)
+
+2. **Plot Files**
+- Individual property plots for each unit (replica, or centroid with `-src fel`)
+- Combined plots showing all units
+- Average plots across all units
+
+3. **Correlation Matrix Files**
+- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) dCCM matrix, values in [-1, 1]. Omitted with `--no_dccm`.
+- **`dccm_plot.png`** / **`dccm_average.png`**: dCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
+- **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in [0, 1]. Omitted with `--no_lmi`.
+- **`lmi_plot.png`** / **`lmi_average.png`**: LMI heatmap, sequential colormap (LMI has no sign).
+
+4. **HTML Summary**
+- Interactive summary report with tables and embedded plots
+- Statistics for each unit and averages across all units
+- An "Incomplete Units" section when any unit hadn't reached its target cycle count at analysis time (see [Handling Incomplete Units](#handling-incomplete-units))
+- Easy navigation and visualization of results
+
+
+Furthermore, some basic analyses are written inside each replica folder at the end of the simulation, they can be found as follows:
+
+- **coor-proj.out:** projection of the MD coordinates onto the normal mode space described by the excitation vector
+- **rms-proj.out:** the system RMSD displacement along the excitation vectors
+- **vp-proj.out:** projection of the MD velocities onto the normal mode space described by the excitation vector
+- **ek-proj.out:** displays the additional kinetic energy at each MD step
+
+[Back to top ↩](#)
+* ****
+
 # Usage Examples
-Example files are available at the **`tutorial`** folder (human calmodulin). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
+Example files are available at the **[tutorial](tutorial)** folder (human calmodulin). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
 
 ## Using OpenMM inputs and heavy atoms NMs
 ```
@@ -659,11 +638,11 @@ pyadmd analyze -r --no_dssp --no_lmi
 ```
 ## Compute a free energy landscape
 ```
-pyadmd freeenergy -c 2 -p 100
+pyadmd fel -c 2 -p 100
 ```
 ## Extend a previous free energy calculation with more centroids and production time
 ```
-pyadmd freeenergy -c 2 -p 500 --max_centroids 100
+pyadmd fel -c 2 -p 500 --max_centroids 100
 ```
 ## Clean previous setup files
 ```
@@ -716,7 +695,7 @@ into that environment. Either way, also swap `cupy-cuda12x>=13.6` for
 `cupy-cuda11x>=13.6` in `pyproject.toml`.
 
 **Note:** if you're installing from [TestPyPI](https://test.pypi.org/project/pyadmd/)
-(e.g. to dry-run a pre-release), resolve dependencies against real PyPI as a
+(*e.g.* to dry-run a pre-release), resolve dependencies against real PyPI as a
 fallback, since TestPyPI does not mirror the full package ecosystem:
 ```
 pip install --index-url https://test.pypi.org/simple/ \
@@ -741,8 +720,8 @@ by `pip install`. Requires Python ≥ 3.12. Core dependencies:
   - `biopython`
   - `cupy-cuda12x>=13.6` (GPU-accelerated ENM diagonalization)
 
-External system dependency (not pip-installable):
-  - `dssp` (4.x), required for secondary structure analysis. Refer to the *[DSSP official GitHub repository](https://github.com/PDB-REDO/dssp?tab=readme-ov-file#building)* for building details.
+External system dependency (must be installed separately):
+  - `dssp` (>=4.2.2), required for secondary structure analysis. Refer to the *[DSSP official GitHub repository](https://github.com/PDB-REDO/dssp?tab=readme-ov-file#building)* for building details.
 
 [Back to top ↩](#)
 * ****
@@ -751,13 +730,13 @@ External system dependency (not pip-installable):
 # Citing
 Please cite the following paper if you are using any Adaptive MDeNM application in your work:
 
-[Resende-Lara, P. T. et al. Adaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein Conformational Space and Reveals the Functional Role of Frequency Coupling. *Journal of Chemical Theory and Computation*. DOI: 10.1021/acs.jctc.6c00398](https://pubs.acs.org/doi/10.1021/acs.jctc.6c00398)
+Resende-Lara, P. T. *et al.* Adaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein Conformational Space and Reveals the Functional Role of Frequency Coupling. *J. Chem. Theory Comput.* 14 July 2026; **22** (13): 6304–6321. https://doi.org/10.1021/acs.jctc.6c00398
 
 [Back to top ↩](#)
 * ****
 
 # License
-This project is licensed under the GNU General Public License v3.0 (GPLv3).
+This project is licensed under the GNU General Public License v3.0 (GPLv3) and is distributed as is, with absolutely no warranty.
 See the [LICENSE](LICENSE) file for the full text.
 
 [Back to top ↩](#)
