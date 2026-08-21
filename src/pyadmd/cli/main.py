@@ -14,6 +14,7 @@ from pyadmd.cli.commands import (
     cmd_append,
     cmd_analyze,
     cmd_fel,
+    cmd_enm,
     cmd_clean,
 )
 
@@ -67,6 +68,8 @@ def main() -> None:
         cmd_analyze(args, console)
     elif args.option == 'fel':
         cmd_fel(args, console, param_storage)
+    elif args.option == 'enm':
+        cmd_enm(args, console, enm_calculator)
     elif args.option == 'clean':
         cmd_clean(console, cwd, input_dir)
 

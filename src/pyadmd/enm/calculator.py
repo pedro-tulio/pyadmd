@@ -21,6 +21,33 @@ from pyadmd.io.state import make_reference_universe
 import warnings
 warnings.filterwarnings('ignore')
 
+
+def convert_hetatm_to_atom(pdb_file: str) -> None:
+    """
+    Replace HETATM records with ATOM records in a PDB file in place.
+
+    Module-level (rather than a method) so it can be shared by
+    ``ENMCalculator`` and ``pyadmd.enm.analysis`` without either module
+    depending on the other's class internals.
+
+    Args:
+        pdb_file (str): Path to the PDB file to modify. Overwritten in place.
+    """
+    with open(pdb_file, 'r') as f:
+        lines = f.readlines()
+
+    new_lines = []
+    for line in lines:
+        if line.startswith('HETATM'):
+            # Replace HETATM with ATOM while preserving spacing
+            new_lines.append('ATOM  ' + line[6:])
+        else:
+            new_lines.append(line)
+
+    with open(pdb_file, 'w') as f:
+        f.writelines(new_lines)
+
+
 class ENMCalculator:
     """
     Elastic Network Model calculator for normal mode analysis.
@@ -43,7 +70,10 @@ class ENMCalculator:
 
     def compute_enm(self, positions_ang: np.ndarray, base_name: str,
                     nm_type: str, nm_parsed: List[int],
-                    input_dir: str, psffile: str) -> None:
+                    input_dir: str, psffile: str,
+                    cutoff: Optional[float] = None,
+                    spring_constant: float = 1.0,
+                    max_modes: Optional[int] = None) -> None:
         """
         Setup and run ENM analysis.
 
@@ -53,11 +83,23 @@ class ENMCalculator:
                 written to a temporary PDB via a reference Universe so that
                 both NAMD and OpenMM input paths feed ENM identically.
             base_name (str): Base filename stem used for ENM output directory
-                and file prefixes (e.g. ``"system"`` → ``inputs/system_enm/``).
+                and file prefixes (e.g. ``system`` > ``inputs/system_enm/``).
             nm_type (str): Type of normal mode calculation ('CA' or 'HEAVY').
             nm_parsed (list): List containing mode numbers to analyze.
             input_dir (str): Input directory path.
             psffile (str): PSF topology filename.
+            cutoff (float, optional): Interaction cutoff distance in Å,
+                forwarded to ``create_system``. Defaults to ``None``, which
+                preserves the previous hardcoded behavior (15.0 Å for CA,
+                12.0 Å for heavy-atom models -- see ``create_system``).
+            spring_constant (float, optional): ENM harmonic spring constant
+                in kcal/mol/Å², forwarded to ``create_system``. Defaults to
+                ``1.0``, identical to the previous hardcoded value.
+            max_modes (int, optional): Number of non-rigid-body vibrational
+                modes to compute, forwarded to ``compute_normal_modes`` as
+                ``n_modes``. Defaults to ``None``, which preserves the
+                previous behavior (``compute_normal_modes``'s own default
+                of 50 modes).
         """
         # Create output folder
         output_folder = f"{input_dir}/{base_name}_enm"
@@ -77,8 +119,9 @@ class ENMCalculator:
         system, topology, positions = self.create_system(
             pdb_file,
             model_type=nm_type,
+            cutoff=cutoff,
             output_prefix=output_prefix,
-            spring_constant=1,
+            spring_constant=spring_constant,
         )
 
         # Compute Hessian
@@ -96,7 +139,7 @@ class ENMCalculator:
         # Compute Normal Modes
         frequencies, enm, eigenvalues = self.compute_normal_modes(
             mw_hessian,
-            n_modes=None,
+            n_modes=max_modes,
             use_gpu=True
         )
 
@@ -133,7 +176,8 @@ class ENMCalculator:
 
     def create_system(self, pdb_file: str, model_type: str = 'ca',
                       cutoff: Optional[float] = None, spring_constant: float = 1.0,
-                      output_prefix: str = "input") -> Tuple[mm.System, app.Topology, unit.Quantity]:
+                      output_prefix: str = "input",
+                      selection: Optional[str] = "protein") -> Tuple[mm.System, app.Topology, unit.Quantity]:
         """
         Create an Elastic Network Model system based on the specified model type.
 
@@ -144,6 +188,12 @@ class ENMCalculator:
                             If None, uses default values: 15.0Å for CA model, 12.0Å for heavy-atom model
             spring_constant (float): Spring constant for the ENM bonds in kcal/mol/Å²
             output_prefix (str): Prefix for output files
+            selection (str, optional): MDAnalysis atom selection string
+                applied to ``pdb_file`` before the ENM is built, so that
+                non-protein atoms (water, lipids, ions, etc.) present in
+                the input structure are excluded from the Hessian.
+                Defaults to ``"protein"``. Pass ``None`` to disable
+                filtering and use every atom in ``pdb_file`` as-is.
 
         Returns:
             system (openmm.System): The created OpenMM system
@@ -151,11 +201,15 @@ class ENMCalculator:
             positions (openmm.unit.Quantity): The positions of particles in the system
 
         Raises:
-            ValueError: If an invalid model type is specified or no relevant atoms are found
+            ValueError: If an invalid model type is specified, the
+                selection matches no atoms, or no relevant atoms are found.
         """
         # Set default cutoffs if not provided
         if cutoff is None:
             cutoff = 15.0 if model_type == 'ca' else 12.0
+
+        if selection:
+            pdb_file = self._apply_selection(pdb_file, selection, output_prefix)
 
         if model_type == 'ca':
             return self._create_ca_system(pdb_file, cutoff, spring_constant, output_prefix)
@@ -163,6 +217,41 @@ class ENMCalculator:
             return self._create_heavy_system(pdb_file, cutoff, spring_constant, output_prefix)
         else:
             raise ValueError(f"Unknown model type: {self.console.ERR}{model_type}{self.console.STD}")
+
+    def _apply_selection(self, pdb_file: str, selection: str, output_prefix: str) -> str:
+        """
+        Filter ``pdb_file`` down to ``selection`` (MDAnalysis selection
+        language) and write the result to a new PDB file.
+
+        Args:
+            pdb_file (str): Path to the input PDB file.
+            selection (str): MDAnalysis atom selection string, e.g.
+                ``"protein"``.
+            output_prefix (str): Prefix used to name the filtered PDB
+                (``{output_prefix}_selected.pdb``).
+
+        Returns:
+            str: Path to the filtered PDB file.
+
+        Raises:
+            ValueError: If the selection matches zero atoms.
+        """
+        import MDAnalysis as mda
+
+        u = mda.Universe(pdb_file)
+        sel = u.select_atoms(selection)
+        if sel.n_atoms == 0:
+            raise ValueError(
+                f"Selection '{selection}' matched 0 atoms in {pdb_file}."
+            )
+
+        filtered_pdb = f"{output_prefix}_selected.pdb"
+        sel.write(filtered_pdb, file_format="PDB")
+        print(f"{self.console.PGM_NAM}Selection '{self.console.EXT}{selection}"
+              f"{self.console.STD}' matched {self.console.EXT}{sel.n_atoms}"
+              f"{self.console.STD} atoms (of {self.console.EXT}{u.atoms.n_atoms}"
+              f"{self.console.STD} total).")
+        return filtered_pdb
 
     def _create_ca_system(self, pdb_file: str, cutoff: float,
                           spring_constant: float,
@@ -177,7 +266,7 @@ class ENMCalculator:
         Args:
             pdb_file (str): Path to the input PDB file.
             cutoff (float): Maximum Cα–Cα distance in Å for ENM bond formation.
-            spring_constant (float): Harmonic spring constant in kcal mol⁻¹ Å⁻².
+            spring_constant (float): Harmonic spring constant in kcal mol-1 Å-2.
             output_prefix (str): Prefix used when writing the Cα PDB output file.
 
         Returns:
@@ -271,12 +360,12 @@ class ENMCalculator:
 
         Extracts all non-hydrogen atoms, assigns element-specific masses, and
         connects pairs within [2.0 Å, cutoff] with a harmonic spring.  The
-        reduced structure is saved to {output_prefix}_heavy.pdb.
+        reduced structure is saved to {output_prefix}_heavy_structure.pdb.
 
         Args:
             pdb_file (str): Path to the input PDB file.
             cutoff (float): Maximum inter-atom distance in Å for ENM bond formation.
-            spring_constant (float): Harmonic spring constant in kcal mol⁻¹ Å⁻².
+            spring_constant (float): Harmonic spring constant in kcal mol-1 Å-2.
             output_prefix (str): Prefix used when writing the heavy-atom PDB output file.
 
         Returns:
@@ -352,7 +441,7 @@ class ENMCalculator:
         system.addForce(mm.CMMotionRemover())
 
         # Save heavy atom structure
-        heavy_pdb_file = f"{output_prefix}_heavy.pdb"
+        heavy_pdb_file = f"{output_prefix}_heavy_structure.pdb"
         with open(heavy_pdb_file, 'w') as f:
             app.PDBFile.writeFile(new_topology, positions_quantity, f)
         print(f"{self.console.PGM_NAM}Heavy-atom structure saved to {self.console.EXT}{heavy_pdb_file}{self.console.STD}.")
@@ -640,7 +729,7 @@ class ENMCalculator:
         t0 = time.time()
 
         if issparse(hessian):
-            # Shift-invert ARPACK: transforming the problem to (H - σI)⁻¹ maps the smallest
+            # Shift-invert ARPACK: transforming the problem to (H - σI)-1 maps the smallest
             # eigenvalues of H to the largest of the shifted operator, making convergence fast.
             # σ = 1e-6 sits just above zero to avoid the exact null space of rigid-body modes
             print(f"{self.console.PGM_NAM}Diagonalizing sparse mass-weighted Hessian...")
@@ -685,25 +774,11 @@ class ENMCalculator:
 
     def convert_hetatm_to_atom(self, pdb_file: str) -> None:
         """
-        Replace HETATM records with ATOM records in a PDB file in place.
-
-        Args:
-            pdb_file (str): Path to the PDB file to modify. Overwritten in place.
+        Thin alias for the module-level ``convert_hetatm_to_atom`` (kept as
+        a method for backward compatibility with existing call sites in
+        this class); see that function's docstring for details.
         """
-        with open(pdb_file, 'r') as f:
-            lines = f.readlines()
-
-        new_lines = []
-        for line in lines:
-            if line.startswith('HETATM'):
-                # Replace HETATM with ATOM while preserving spacing
-                new_line = 'ATOM  ' + line[6:]
-                new_lines.append(new_line)
-            else:
-                new_lines.append(line)
-
-        with open(pdb_file, 'w') as f:
-            f.writelines(new_lines)
+        convert_hetatm_to_atom(pdb_file)
 
     def write_nm_vectors(self, modes: np.ndarray, frequencies: np.ndarray,
                          system: mm.System, topology: app.Topology, nm: int,
@@ -713,7 +788,7 @@ class ENMCalculator:
 
         Extracts mode displacement vectors for a single normal mode and writes them to
         an XYZ format file. Maps ENM-reduced structure atoms back to the full PDB structure
-        for visualization. Computes and reports the vibrational frequency in cm⁻¹.
+        for visualization. Computes and reports the vibrational frequency in cm-1.
 
         Args:
             modes (numpy.ndarray): Normal mode eigenvectors matrix, shape (3N, M),
@@ -733,7 +808,7 @@ class ENMCalculator:
             None
 
         Note:
-            Output frequency is converted from internal units to cm⁻¹ using a factor
+            Output frequency is converted from internal units to cm-1 using a factor
             of 108.58. The method performs O(1) atom mapping using a residue-name
             dictionary lookup for efficiency.
         """
@@ -758,13 +833,13 @@ class ENMCalculator:
             enm_to_original_map.append(orig_lookup[key])
 
         # Write each mode to a separate XYZ file
-        freq = frequencies[nm] * 108.58  # Convert to cm⁻¹
+        freq = frequencies[nm] * 108.58  # Convert to cm-1
         output_file = f"{output_prefix}_mode_{nm}.xyz"
 
         with open(output_file, 'w') as f:
             # Write header
             f.write(f"{n_original_atoms}\n")
-            f.write(f"Normal Mode {nm}, Frequency: {freq:.2f} cm⁻¹\n")
+            f.write(f"Normal Mode {nm}, Frequency: {freq:.2f} cm-1\n")
 
             # Extract and reshape the mode vector for ENM atoms
             mode_vector = modes[:, nm].reshape(n_particles, 3)
@@ -795,7 +870,7 @@ class ENMCalculator:
             modes (ndarray, shape (3N, M), float64): Normal mode eigenvectors;
                 column i contains the eigenvector for mode i (0-based indexing).
             frequencies (ndarray, shape (M,), float64): Vibrational frequencies in
-                internal angular units. Used for logging only (converted to cm⁻¹).
+                internal angular units. Used for logging only (converted to cm-1).
             system (openmm.System): OpenMM system containing particle masses.
                 Used for mass-weighting the mode displacement vector.
             topology (openmm.app.Topology): Topology of the ENM-reduced structure,
@@ -824,7 +899,6 @@ class ENMCalculator:
         """
         n_particles = system.getNumParticles()
 
-        freq = frequencies[nm] * 108.58  # Convert to cm⁻¹
         output_file = f"{output_prefix}_mode_{nm}_traj.pdb"
 
         # Mass-weight the mode vector

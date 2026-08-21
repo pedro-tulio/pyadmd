@@ -1,4 +1,4 @@
-"""Post-hoc structural analysis (RMSD, RoG, SASA, hydrophobic exposure, RMSF, dCCM/LMI, DSSP)."""
+"""Post-hoc structural analysis (RMSD, RoG, SASA, hydrophobic exposure, RMSF, DCCM/LMI, DSSP)."""
 
 import glob
 import json
@@ -52,7 +52,7 @@ class Analyzer:
     This class handles computation and visualization of various structural
     properties from simulation trajectories including RMSD, radius of
     gyration, SASA, hydrophobic exposure, secondary structure, RMSF, and
-    dCCM/LMI residue-residue correlation matrices.
+    DCCM/LMI residue-residue correlation matrices.
 
     Attributes:
         console (ConsoleConfig): Console configuration object for formatted output
@@ -64,7 +64,7 @@ class Analyzer:
             ('replica' for pyadmd, 'centroid_frame' for fel).
         unit_label (str): Human-readable label for an analysis unit
             ('Replica' for pyadmd, 'Centroid frame' for fel).
-        skip_dccm (bool): If True, skip dCCM calculation.
+        skip_dccm (bool): If True, skip DCCM calculation.
         skip_lmi (bool): If True, skip LMI calculation.
     """
     def __init__(self, console: ConsoleConfig, param_file: str = "pyAdMD_params.json", rough: bool = False,
@@ -83,7 +83,7 @@ class Analyzer:
             no_sasa (bool): If True, skip SASA calculation
             no_rmsf (bool): If True, skip RMSF calculation
             no_dssp (bool): If True, skip secondary structure (DSSP) calculation
-            no_dccm (bool): If True, skip dCCM (dynamic cross-correlation
+            no_dccm (bool): If True, skip DCCM (dynamic cross-correlation
                 matrix) calculation
             no_lmi (bool): If True, skip LMI (Linear Mutual Information)
                 calculation
@@ -255,7 +255,7 @@ class Analyzer:
             - ``rmsf.csv``               -> per-residue RMSF rows (if present;
                                              absent when ``--no_rmsf`` was
                                              used for the original run)
-            - ``dccm_matrix.npy``        -> dCCM matrix (if present)
+            - ``dccm_matrix.npy``        -> DCCM matrix (if present)
             - ``lmi_matrix.npy``         -> LMI matrix (if present)
 
         The returned shape matches ``_analyze_trajectory``'s return value
@@ -367,7 +367,7 @@ class Analyzer:
         if self.skip_sasa:   skipped.append("SASA and Hydrophobic Exposure")
         if self.skip_rmsf:   skipped.append("RMSF")
         if self.skip_dssp:   skipped.append("Secondary Structure (DSSP)")
-        if self.skip_dccm:   skipped.append("dCCM")
+        if self.skip_dccm:   skipped.append("DCCM")
         if self.skip_lmi:    skipped.append("LMI")
         if skipped:
             print(f"{self.console.PGM_WRN}Skipping analyses: {self.console.WRN}{', '.join(skipped)}{self.console.STD}\n")
@@ -490,7 +490,7 @@ class Analyzer:
         if not self.skip_rmsf and running_rmsf:
             self._generate_rmsf_avg_plot(running_rmsf)
 
-        # Generate average dCCM/LMI plots (only if computed)
+        # Generate average DCCM/LMI plots (only if computed)
         if not self.skip_dccm and dccm_sum is not None:
             self._generate_correlation_avg_plot(dccm_sum, dccm_count, kind='dccm')
         if not self.skip_lmi and lmi_sum is not None:
@@ -577,7 +577,7 @@ class Analyzer:
         if self.skip_sasa:   skipped.append("SASAand Hydrophobic Exposure")
         if self.skip_rmsf:   skipped.append("RMSF")
         if self.skip_dssp:   skipped.append("Secondary Structure (DSSP)")
-        if self.skip_dccm:   skipped.append("dCCM")
+        if self.skip_dccm:   skipped.append("DCCM")
         if self.skip_lmi:    skipped.append("LMI")
         if skipped:
             print(f"{self.console.PGM_WRN}Skipping analyses: {self.console.WRN}{', '.join(skipped)}{self.console.STD}\n")
@@ -686,7 +686,7 @@ class Analyzer:
         if not self.skip_rmsf and running_rmsf:
             self._generate_rmsf_avg_plot(running_rmsf)
 
-        # Generate average dCCM/LMI plots (only if computed)
+        # Generate average DCCM/LMI plots (only if computed)
         if not self.skip_dccm and dccm_sum is not None:
             self._generate_correlation_avg_plot(dccm_sum, dccm_count, kind='dccm')
         if not self.skip_lmi and lmi_sum is not None:
@@ -754,7 +754,7 @@ class Analyzer:
                 - rep_num (int): Replica identifier passed through for pool callback tracking.
                 - data (list[dict]): Per-frame structural property dictionaries; empty on failure.
                 - rmsf_data (list[dict]): Per-residue RMSF dictionaries; empty on failure.
-                - dccm (np.ndarray or None): (n_ca, n_ca) dCCM matrix; None if skipped/failed.
+                - dccm (np.ndarray or None): (n_ca, n_ca) DCCM matrix; None if skipped/failed.
                 - lmi (np.ndarray or None): (n_ca, n_ca) LMI matrix; None if not requested/failed.
         """
         try:
@@ -789,7 +789,7 @@ class Analyzer:
                   helix, sheet, coil, turn, other.
                 - rmsf_data (list[dict]): One dictionary per Cα atom with keys:
                   replica, residue_index, residue_name, rmsf.
-                - dccm (np.ndarray or None): (n_ca, n_ca) dCCM matrix.
+                - dccm (np.ndarray or None): (n_ca, n_ca) DCCM matrix.
                 - lmi (np.ndarray or None): (n_ca, n_ca) LMI matrix.
                 All are empty/None if the PSF or DCD file is not found.
         """
@@ -822,13 +822,13 @@ class Analyzer:
         given PSF as topology, then computes per-frame RMSD, radius of
         gyration, SASA, hydrophobic exposure, and secondary structure
         content, and calculates per-residue RMSF plus (unless skipped) the
-        dCCM residue-residue correlation matrix and (if requested) LMI.
+        DCCM residue-residue correlation matrix and (if requested) LMI.
         Plots and CSV files are written to ``out_dir``. This method
         contains the computation logic shared by both the pyadmd
         (``analyze_replica``) and fel (``analyze_all_centroids``)
         source paths.
 
-        RMSF, dCCM, and LMI share a single per-frame Kabsch alignment pass
+        RMSF, DCCM, and LMI share a single per-frame Kabsch alignment pass
         (performed once inside ``_calc_rmsf``) rather than each re-aligning
         the trajectory independently.
 
@@ -946,7 +946,7 @@ class Analyzer:
 
                 data.append(frame_data)
 
-            # RMSF, dCCM, and LMI share one aligned-trajectory pass
+            # RMSF, DCCM, and LMI share one aligned-trajectory pass
             rmsf_data: List[Dict[str, Any]] = []
             dccm: Optional[np.ndarray] = None
             lmi: Optional[np.ndarray] = None
@@ -954,7 +954,7 @@ class Analyzer:
             if need_alignment:
                 rmsf_data, aligned_disp = self._calc_rmsf(u, unit_id)
                 if self.skip_rmsf:
-                    rmsf_data = []  # alignment ran for dCCM/LMI, but RMSF itself wasn't requested
+                    rmsf_data = []  # alignment ran for DCCM/LMI, but RMSF itself wasn't requested
 
                 if aligned_disp is not None:
                     if not self.skip_dccm:
@@ -963,7 +963,7 @@ class Analyzer:
                             np.save(f"{out_dir}/dccm_matrix.npy", dccm)
                             self._plot_correlation_matrix(
                                 dccm, f"{out_dir}/dccm_plot.png",
-                                f"dCCM \u2014 {self.unit_label} {unit_id}", kind='dccm'
+                                f"DCCM \u2014 {self.unit_label} {unit_id}", kind='dccm'
                             )
                     if not self.skip_lmi:
                         lmi = self._calc_lmi(aligned_disp)
@@ -1113,7 +1113,7 @@ class Analyzer:
         """
         Calculate per-residue RMSF for Cα atoms over the full trajectory,
         and return the shared per-frame aligned Cα displacement array used
-        by dCCM/LMI.
+        by DCCM/LMI.
 
         Selects Cα atoms, aligns each frame to the first-frame reference via a
         rotation matrix, accumulates squared deviations, and returns the
@@ -1182,7 +1182,7 @@ class Analyzer:
     def _calc_dccm(self, aligned_disp: np.ndarray) -> np.ndarray:
         """
         Compute the linear (Pearson) dynamic cross-correlation matrix
-        (dCCM) from a shared aligned/mean-centered Cα displacement
+        (DCCM) from a shared aligned/mean-centered Cα displacement
         trajectory.
 
             C_ij = <dr_i . dr_j> / sqrt(<dr_i^2> <dr_j^2>)
@@ -1222,7 +1222,7 @@ class Analyzer:
             return dccm
 
         except Exception as e:
-            print(f"{self.console.PGM_ERR}Error calculating dCCM: {self.console.ERR}{e}{self.console.STD}")
+            print(f"{self.console.PGM_ERR}Error calculating DCCM: {self.console.ERR}{e}{self.console.STD}")
             return np.zeros((0, 0))
 
     def _calc_lmi(self, aligned_disp: np.ndarray) -> np.ndarray:
@@ -1236,7 +1236,7 @@ class Analyzer:
 
         where Sigma_ii, Sigma_jj are the 3x3 covariance matrices of atoms
         i, j and Sigma_combined is the 6x6 joint covariance matrix of
-        (i, j). Unlike dCCM, LMI is signless (it measures total coupling
+        (i, j). Unlike DCCM, LMI is signless (it measures total coupling
         strength, not direction) and ranges over [0, 1].
 
         Reference: Lange & Grubmüller, Proteins 2006, 62:1053-1061,
@@ -1298,7 +1298,7 @@ class Analyzer:
     def _plot_correlation_matrix(self, matrix: np.ndarray, out_path: str, title: str,
                                  kind: str = 'dccm') -> None:
         """
-        Plot and save a correlation-matrix heatmap. Shared by dCCM/LMI,
+        Plot and save a correlation-matrix heatmap. Shared by DCCM/LMI,
         for both per-unit and cross-unit average matrices.
 
         Args:
@@ -1771,7 +1771,7 @@ class Analyzer:
         if not self.skip_sasa:
             notes_items.insert(-1, "<li>SASA is calculated using Bio.PDB.SASA (Shrake-Rupley algorithm)</li>")
         if not self.skip_dccm:
-            notes_items.insert(-1, "<li>dCCM (dynamic cross-correlation matrix) uses linear Pearson "
+            notes_items.insert(-1, "<li>DCCM (dynamic cross-correlation matrix) uses linear Pearson "
                                     "correlation of Kabsch-aligned Cα displacements; +1 = fully "
                                     "correlated, 0 = uncorrelated, -1 = fully anti-correlated</li>")
         if not self.skip_lmi:

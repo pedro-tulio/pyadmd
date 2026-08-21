@@ -4,7 +4,10 @@ import json
 import os
 import shutil
 import sys
+import traceback
 from typing import Any
+
+import numpy as np
 
 from pyadmd.console import ConsoleConfig
 from pyadmd.io.dcd import find_last_completed_cycle
@@ -18,6 +21,7 @@ from pyadmd.io.state import (
     save_reference_state,
 )
 from pyadmd.enm.calculator import ENMCalculator
+from pyadmd.enm.analysis import ENMAnalyzer
 from pyadmd.modes.exciter import ModeExciter
 from pyadmd.simulation.runner import SimulationRunner
 from pyadmd.fel.calculator import FreeEnergyCalculator, export_cluster
@@ -152,7 +156,10 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
         base_name = os.path.splitext(os.path.basename(rstfile))[0]
 
     # Store in args for SimulationRunner access
-    n_steps = 100  # MD steps per excitation cycle (2 fs/step → 0.2 ps/cycle)
+    if args.no_correc:
+        n_steps = 1000 # MD steps per excitation cycle (2 fs/step → 2.0 ps/cycle)
+    else:
+        n_steps = 100  # MD steps per excitation cycle (2 fs/step → 0.2 ps/cycle)
     args.n_steps = n_steps
     end_loop = int(sim_time / (n_steps * 0.002))
 
@@ -179,9 +186,11 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
 
     # Generate mode combinations
     print(f"\n{console.PGM_NAM}Generating {console.EXT}{replicas}{console.STD} uniformly "
-          f"distributed combinations of modes {console.EXT}{modes}{console.STD}.")
+          f"distributed combinations of modes {console.EXT}{modes}{console.STD} "
+          f"(seed={console.EXT}{args.seed}{console.STD}).")
     factors = mode_exciter.generate_factors(
-        replicas, len(nm_parsed), cwd, nm_parsed, nm_type, base_name, sys_coor
+        replicas, len(nm_parsed), cwd, nm_parsed, nm_type, base_name, sys_coor,
+        seed=args.seed,
     )
     mode_exciter.combine_modes(replicas, factors, cwd, sys_coor)
 
@@ -585,3 +594,140 @@ def cmd_clean(console: ConsoleConfig, cwd: str, input_dir: str) -> None:
             shutil.rmtree(os.path.join(input_dir, item), ignore_errors=True)
 
     print(f"{console.PGM_NAM}Erasing is done.\n")
+
+
+def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) -> None:
+    """
+    Implements ``pyadmd enm``: standalone Elastic Network Model / normal
+    mode analysis, independent of a ``pyadmd run``/``inputs/`` working
+    directory (bare PDB in, own ``-o/--output`` folder out).
+
+    Two mutually exclusive paths:
+
+      - ``-w/--write_modes`` set: re-derive vector/trajectory files from a
+        previously completed run's saved arrays, without recomputing the
+        ENM (``ENMAnalyzer.write_modes_from_files``).
+      - Otherwise: run a full ENM computation from ``-i/--input``, save
+        the filtered mode/frequency arrays plus the reduced structure
+        PDB (both written by ``ENMCalculator.create_system``/
+        ``compute_normal_modes``), then delegate to the same
+        ``write_modes_from_files`` path used by ``-w`` for the actual
+        vector/trajectory writing -- so the two paths always agree on
+        file format, and the logic is written once.
+
+    Args:
+        args: Parsed CLI arguments for the ``enm`` subcommand.
+        console: Console configuration for formatted output.
+        enm_calculator: Shared ENMCalculator instance (same one
+            ``cmd_run`` uses for CA/HEAVY mode generation).
+    """
+    analyzer = ENMAnalyzer(console)
+
+    # -w / --write_modes: post-hoc path, no recomputation needed
+    if args.write_modes is not None:
+        print(f"{console.PGM_NAM}{console.TLE}Write ENM modes from a previous run{console.STD}\n")
+        try:
+            mode_numbers = analyzer.parse_mode_string(args.write_modes)
+            analyzer.write_modes_from_files(
+                output_folder=args.output,
+                mode_numbers=mode_numbers,
+                write_vectors=not args.no_nm_vec,
+                write_trajectories=not args.no_nm_trj,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"{console.PGM_ERR}{exc}")
+            sys.exit(1)
+        return
+
+    print(f"{console.PGM_NAM}{console.TLE}Elastic Network Model / Normal Mode Analysis{console.STD}\n")
+
+    if not os.path.isfile(args.input):
+        print(f"{console.PGM_ERR}Input PDB file {console.ERR}{args.input}{console.STD} not found.")
+        sys.exit(1)
+
+    output_folder = args.output
+    os.makedirs(output_folder, exist_ok=True)
+
+    base_name     = os.path.splitext(os.path.basename(args.input))[0]
+    output_prefix = os.path.join(output_folder, base_name)
+    model_type    = args.model.lower()
+    prefix        = "ca" if model_type == "ca" else "heavy"
+
+    # System build + Hessian + diagonalization
+    try:
+        system, topology, positions = enm_calculator.create_system(
+            args.input,
+            model_type=model_type,
+            cutoff=args.cutoff,
+            spring_constant=args.spring_constant,
+            output_prefix=output_prefix,
+            selection=args.selection,
+        )
+        hessian    = enm_calculator.hessian_enm(system, positions)
+        mw_hessian = enm_calculator.mass_weight_hessian(hessian, system)
+        frequencies, modes, eigenvalues = enm_calculator.compute_normal_modes(
+            mw_hessian, n_modes=args.max_modes, use_gpu=not args.no_gpu,
+        )
+    except Exception as exc:
+        print(f"{console.PGM_ERR}ENM computation failed: {console.ERR}{exc}{console.STD}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    freq_file  = f"{output_prefix}_{prefix}_frequencies.npy"
+    modes_file = f"{output_prefix}_{prefix}_modes.npy"
+    np.save(freq_file, frequencies)
+    np.save(modes_file, modes)
+    print(f"{console.PGM_NAM}Results saved to "
+          f"{console.EXT}{output_prefix}_{prefix}_*.npy{console.STD} files.")
+
+    n_available = len(frequencies)
+    if n_available == 0:
+        print(f"{console.PGM_ERR}No non-rigid modes were computed; nothing further to do.")
+        sys.exit(1)
+
+    try:
+        if not args.no_collectivity:
+            collectivity_file = f"{output_prefix}_{prefix}_collectivity.csv"
+            analyzer.write_collectivity(frequencies, modes, system, collectivity_file,
+                                        n_modes=min(20, n_available))
+
+        if not args.no_contributions:
+            contributions_file = f"{output_prefix}_{prefix}_contributions.png"
+            analyzer.plot_mode_contributions(eigenvalues, contributions_file,
+                                             n_modes=min(20, n_available))
+
+        if not args.no_rmsf:
+            rmsf_file = f"{output_prefix}_{prefix}_rmsf.png"
+            analyzer.compute_rmsf_from_modes(system, eigenvalues, modes, topology,
+                                             rmsf_file, n_modes=min(50, n_available))
+
+        if not args.no_dccm:
+            dccm_file = f"{output_prefix}_{prefix}_dccm.png"
+            analyzer.compute_dccm_from_modes(system, eigenvalues, modes, topology,
+                                             dccm_file, n_modes=min(50, n_available),
+                                             use_gpu=not args.no_gpu)
+    except Exception as exc:
+        print(f"{console.PGM_ERR}Analysis step failed: {console.ERR}{exc}{console.STD}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    if args.no_nm_vec and args.no_nm_trj:
+        print(f"{console.PGM_NAM}Skipping mode vector/trajectory writing "
+              "(--no_nm_vec and --no_nm_trj both set).")
+    else:
+        # Skip the first 6 trivial ENM modes
+        output_modes = min(args.output_modes, n_available)
+        mode_numbers = list(range(7, output_modes + 7))
+        try:
+            analyzer.write_modes_from_files(
+                output_folder=output_folder,
+                mode_numbers=mode_numbers,
+                write_vectors=not args.no_nm_vec,
+                write_trajectories=not args.no_nm_trj,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"{console.PGM_ERR}{exc}")
+            sys.exit(1)
+
+    print(f"\n{console.PGM_NAM}ENM analysis complete. Results saved to "
+          f"{console.EXT}{output_folder}{console.STD}.")

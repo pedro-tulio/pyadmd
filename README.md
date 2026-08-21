@@ -25,6 +25,12 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [Equilibration Molecular Dynamics](#equilibration-molecular-dynamics)
   - [CHARMM Normal Modes Analysis (Optional)](#charmm-normal-modes-analysis-optional)
   - [ENM Computation](#enm-computation)
+    - [Physical Motivation and Coarse-Graining](#physical-motivation-and-coarse-graining)
+    - [Network Construction](#network-construction)
+    - [The Hessian Matrix](#the-hessian-matrix)
+    - [Normal Mode Analysis and Diagonalization](#normal-mode-analysis-and-diagonalization)
+    - [Rigid-Body Modes and the Null Space](#rigid-body-modes-and-the-null-space)
+    - [Equipartition and the Physical Meaning of Eigenvalues](#equipartition-and-the-physical-meaning-of-eigenvalues)
   - [Uniform Normal Modes Combination](#uniform-normal-modes-combination)
     - [Problem Definition](#problem-definition)
     - [Mode Subspace Geometry](#mode-subspace-geometry)
@@ -40,6 +46,7 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [ENM](#enm)
   - [Physical force-field based normal modes](#physical-force-field-based-normal-modes)
 - [Configuration](#configuration)
+  - [Normal Modes Selection](#normal-modes-selection)
   - [Energy injection](#energy-injection)
   - [Simulation time](#simulation-time)
   - [Excitation direction update](#excitation-direction-update-1)
@@ -57,12 +64,19 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
     - [Parameters](#parameters-2)
     - [Feature Flags](#feature-flags-1)
     - [Skip Flags](#skip-flags)
+  - [ENM](#enm-1)
+    - [Parameters](#parameters-3)
+    - [Skip Flags](#skip-flags-1)
+    - [Post-hoc Mode Re-writer](#post-hoc-mode-re-writer)
+  - [Output Structure](#output-structure)
+    - [Directory Organization](#directory-organization)
+    - [Output Files Description](#output-files-description)
 - [Free Energy Landscape](#free-energy-landscape)
   - [Method Overview](#method-overview-1)
   - [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation)
-  - [Output Structure](#output-structure)
-    - [Directory Organization](#directory-organization)
-  - [Output Files Description](#output-files-description)
+  - [Output Structure](#output-structure-1)
+    - [Directory Organization](#directory-organization-1)
+  - [Output Files Description](#output-files-description-1)
 - [Analysis](#analysis-1)
   - [Basic Structural Properties Calculated](#basic-structural-properties-calculated)
   - [Analysis Modes](#analysis-modes)
@@ -72,9 +86,9 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [Trajectory Source](#trajectory-source)
   - [Handling Incomplete Units](#handling-incomplete-units)
   - [Configuration Parameters](#configuration-parameters)
-  - [Output Structure](#output-structure-1)
-    - [Directory Organization](#directory-organization-1)
-  - [Output Files Description](#output-files-description-1)
+  - [Output Structure](#output-structure-2)
+    - [Directory Organization](#directory-organization-2)
+  - [Output Files Description](#output-files-description-2)
 - [Usage Examples](#usage-examples)
   - [Using OpenMM inputs and heavy atoms NMs](#using-openmm-inputs-and-heavy-atoms-nms)
   - [Using NAMD inputs and Cα NMs with custom parameters](#using-namd-inputs-and-cα-nms-with-custom-parameters)
@@ -85,6 +99,8 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [Analyze every 5 ps skipping DSSP and LMI](#analyze-every-5-ps-skipping-dssp-and-lmi)
   - [Compute a free energy landscape](#compute-a-free-energy-landscape)
   - [Extend a previous free energy calculation with more centroids and production time](#extend-a-previous-free-energy-calculation-with-more-centroids-and-production-time)
+  - [Compute a standalone ENM (Cα model, writing modes 7-16)](#compute-a-standalone-enm-cα-model-writing-modes-7-16)
+  - [Re-write additional modes from a previous ENM run](#re-write-additional-modes-from-a-previous-enm-run)
   - [Clean previous setup files](#clean-previous-setup-files)
 - [Installation](#installation)
 - [Dependencies](#dependencies)
@@ -109,7 +125,105 @@ This is a prerequired step to perform aMDeNM simulations. It consists in perform
 If using CHARMM-based normal modes, it is also necessary to compute the modes from the last MD coordinates and store the vectors from the low-frequency end of the vibrational spectrum on a binary file.
 
 ## ENM Computation
-The program computes Cα or heavy atoms Elastic Network Model using the same algorithms as the software available at our *[ENM github repository](https://github.com/pedro-tulio/enm)*.
+### Physical Motivation and Coarse-Graining
+
+Proteins are not rigid bodies: their function is intimately connected to their internal dynamics, ranging from local side-chain rotations and loop fluctuations to large-scale collective domain motions. Classical molecular dynamics (MD) simulations can capture these phenomena in atomic detail, but they are computationally expensive and often struggle to reach the timescales (microseconds to milliseconds) relevant to biologically important conformational changes.
+
+Elastic Network Models offer a powerful and computationally inexpensive alternative. The central insight behind ENMs is that the low-frequency, large-amplitude collective motions of a protein — those most relevant to function — are predominantly determined by the overall topology of the molecular structure, not by the precise details of atomic interactions. In other words, the shape of the molecule, encoded by which atoms or residues are spatially close to one another, largely dictates the repertoire of accessible motions.
+
+This motivates a **coarse-graining** strategy: instead of representing every atom with a detailed force field, the protein is reduced to a set of representative interaction sites connected by harmonic springs. In the **Cα model** (also called ANM, the Anisotropic Network Model), each residue is represented by a single point placed at its α-carbon. In the **heavy-atom model**, all non-hydrogen atoms are retained, yielding a finer-grained representation at the cost of a larger Hessian matrix. The choice of model involves a tradeoff between computational cost and the resolution of the dynamical description.
+
+### Network Construction
+
+Given a set of $`N`$ interaction sites (Cα atoms or heavy atoms) with equilibrium positions $`\mathbf{r}_i^0`$, the elastic network is constructed by connecting every pair of sites $`i`$ and $`j`$ whose equilibrium distance $`r_{ij}^0 = |\mathbf{r}_i^0 - \mathbf{r}_j^0|`$ falls within a specified **cutoff distance** $`r_c`$:
+
+$$
+r_{ij}^0 \leq r_c
+$$
+
+Typical cutoff values are $`10–15 Å`$ for the Cα model and $`7–12 Å`$ for the heavy-atom model. The cutoff is a key parameter: too small a value yields a disconnected or sparse network that fails to capture long-range coupling, while too large a value over-densifies the network and can wash out functionally relevant fluctuation patterns.
+
+The total potential energy of the system under the harmonic approximation is:
+
+$$
+V = \frac{1}{2} \sum_{i < j} k_{ij} \left(r_{ij} - r_{ij}^0\right)^2
+$$
+
+where $`k_{ij}`$ is the spring constant between sites $`i`$ and $`j`$, $`r_{ij}`$ is the instantaneous distance between them, and $`r_{ij}^0`$ is their equilibrium distance. In the simplest ANM formulation, a **uniform spring constant** $`k_{ij} = k`$ is used for all connected pairs. This is a deliberate simplification: the spring constant encodes the stiffness of the local environment, and setting it uniformly to $`k`$ (with default $`k = 1.0 kcal/mol/Å²`$) means the model's predictions are expressed in units relative to $`k`$. More sophisticated variants assign distance-dependent spring constants (e.g., $`k_{ij} \propto (r_{ij}^0)^{-\alpha}`$), but the uniform model already captures the essential topology of collective motions.
+
+### The Hessian Matrix
+
+The dynamical properties of the network are encoded in the **Hessian matrix** $`\mathbf{H}`$, a $`3N \times 3N`$ symmetric matrix of second derivatives of the potential energy with respect to atomic displacements, evaluated at the equilibrium configuration:
+
+$$
+H_{i\alpha,\, j\beta} = \frac{\partial^2 V}{\partial u_{i\alpha}\, \partial u_{j\beta}}\Bigg|_{\mathbf{u}=0}
+$$
+
+where $`u_{i\alpha}`$ is the displacement of site $`i`$ along Cartesian direction $`\alpha \in \{x, y, z\}`$, and similarly for $`u_{j\beta}`$. The factor of three degrees of freedom per site is what distinguishes this **anisotropic** (ANM) formulation from simpler isotropic models: the Hessian retains the full directional information of each pairwise spring, which is essential for producing oriented mode trajectories and the vector dot products required by the DCCM.
+
+Carrying out the differentiation of the pairwise harmonic potential, the off-diagonal $`3 \times 3`$ super-element connecting sites $`i \neq j`$ is:
+
+$$
+\mathbf{H}_{ij} = -\frac{k_{ij}}{(r_{ij}^0)^2} \begin{pmatrix} \Delta x^2 & \Delta x \Delta y & \Delta x \Delta z \\
+\Delta y \Delta x & \Delta y^2 & \Delta y \Delta z \\
+\Delta z \Delta x & \Delta z \Delta y & \Delta z^2 \end{pmatrix}
+$$
+
+where $`\Delta x = x_i^0 - x_j^0`$, $`\Delta y = y_i^0 - y_j^0`$, $`\Delta z = z_i^0 - z_j^0`$ are the components of the equilibrium difference vector $`\mathbf{r}_{ij}^0`$. This super-element is nonzero only when $`r_{ij}^0 \leq r_c`$, so $`\mathbf{H}`$ is sparse for typical cutoff distances. The diagonal blocks are set by the self-consistency condition (Newton's third law):
+
+$$
+\mathbf{H}_{ii} = -\sum_{j \neq i} \mathbf{H}_{ij}
+$$
+
+which ensures that $`\mathbf{H}`$ is positive semi-definite and that rigid-body motions have zero energy cost (see below).
+
+### Normal Mode Analysis and Diagonalization
+
+The equations of motion for the mass-weighted displacements $`\tilde{\mathbf{u}}_i = \sqrt{m_i}\, \mathbf{u}_i`$ (where $`m_i`$ is the mass of site $`i`$) take the form:
+
+$$
+\mathbf{M}^{-1/2} \mathbf{H}\, \mathbf{M}^{-1/2}\, \tilde{\mathbf{u}} = -\lambda\, \tilde{\mathbf{u}}
+$$
+
+where $`\mathbf{M}`$ is the $`3N \times 3N`$ diagonal mass matrix. Seeking solutions of the form $`\tilde{\mathbf{u}}(t) = \mathbf{e}^{(k)} e^{i\omega_k t}`$ leads to the standard **eigenvalue problem**:
+
+$$
+\tilde{\mathbf{H}}\, \mathbf{e}^{(k)} = \lambda_k\, \mathbf{e}^{(k)}
+$$
+
+where $`\tilde{\mathbf{H}} = \mathbf{M}^{-1/2} \mathbf{H}\, \mathbf{M}^{-1/2}`$ is the mass-weighted Hessian. The eigenvalues $`\lambda_k \geq 0`$ are proportional to the squared angular frequencies $`\omega_k^2 = \lambda_k`$ , and the eigenvectors $`\mathbf{e}^{(k)}`$ (also called **normal mode vectors**) define the direction and pattern of collective atomic displacement in mode $`k`$.
+
+Because the Hessian is real, symmetric, and positive semi-definite, it can always be diagonalized by an orthogonal transformation:
+
+$$
+\mathbf{H} = \mathbf{U}\, \boldsymbol{\Lambda}\, \mathbf{U}^T
+$$
+
+where $`\boldsymbol{\Lambda} = \text{diag}(\lambda_1, \lambda_2, \ldots, \lambda_{3N})`$ and $`\mathbf{U}`$ is the matrix of column eigenvectors.
+
+### Rigid-Body Modes and the Null Space
+
+The Hessian of any translationally and rotationally invariant potential has exactly **six zero eigenvalues**, corresponding to three global translations and three global rotations. These are the "trivial" modes: they represent rigid-body motions of the entire molecule that cost no energy. Because the spring network is built around pairwise distances (which are invariant under rigid-body transformations), these six modes are guaranteed to have $`\lambda_k = 0`$ by construction.
+
+In practice, numerical diagonalization yields six eigenvalues very close to — but not exactly — zero, due to floating-point arithmetic. These modes are identified and systematically excluded from all physical analyses. The first **non-trivial** mode is mode 7, corresponding to the lowest-frequency collective internal motion, typically involving the largest-amplitude domain movements. Modes are ordered by increasing frequency: low-frequency modes are large-scale and collective, while high-frequency modes are localized and stiff.
+
+### Equipartition and the Physical Meaning of Eigenvalues
+
+Under the classical harmonic approximation, the **equipartition theorem** states that each normal mode carries an average thermal energy of $`\frac{1}{2}k_B T`$. The mean-square displacement amplitude of mode $`k`$ is therefore:
+
+$$
+\langle A_k^2 \rangle = \frac{k_B T}{\lambda_k}
+$$
+
+This has a profound implication: **low-frequency modes (small $`\lambda_k`$) contribute large-amplitude fluctuations**, while high-frequency modes (large $`\lambda_k`$) contribute small fluctuations. The total thermal fluctuation of the system is dominated by the handful of lowest-frequency modes, which is why ENM-based analyses of fluctuations and correlations are already quite accurate using only the first 10–20 non-trivial modes.
+
+Furthermore, the **inverse of the Hessian** (its pseudo-inverse, excluding the null space) defines the **covariance matrix** of atomic displacements at thermal equilibrium:
+
+$$
+\langle u_{i\alpha}\, u_{j\beta} \rangle = k_B T\, [\mathbf{H}^+]_{i\alpha, j\beta}
+$$
+
+where $`\mathbf{H}^+`$ is the Moore-Penrose pseudo-inverse. This relationship is the foundation for the RMSF and DCCM calculations available via `pyadmd enm` (see [ENM (Standalone Normal Mode Analysis)](#enm-standalone-normal-mode-analysis)).
 
 ## Uniform Normal Modes Combination
 
@@ -242,6 +356,10 @@ $$
 
 where $`\mathbf{M}_{\mathrm{nm}}^+`$ denotes the Moore–Penrose pseudoinverse of $`\mathbf{M}_{\mathrm{nm}}`$. These approximate coefficients are written to the `factors.csv` output file for reference but do not influence the simulation; the physical vectors $`\mathbf{q}_i`$ are used directly as excitation directions.
 
+**Reproducibility:** the only stochastic step in this procedure is the initial placement of the $`P`$ points on $`S^{N-1}`$ before the repulsion loop runs (skipped entirely when $`P=2N`$, see above). This is now controlled by a seeded RNG (`-seed`/`--seed`, default `42`), so `pyadmd run` calls with identical arguments produce identical excitation vectors and `factors.csv` — see [Run Parameters](#parameters).
+
+**Note:** ENM recomputation under `--recalc` (see [Excitation Direction Update](#excitation-direction-update)) draws a *new* random combination each time it fires and is intentionally **not** covered by `--seed`, since its purpose is to re-diversify the excitation direction mid-simulation.
+
 ## Kinetic Energy Control
 The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $`\mathbf{Q}`$ direction is calculated by projecting first the current velocities to the excitation direction $`\mathbf{Q}`$ as $`\mathbf{V}_p = (\mathbf{V}_{curr} \cdot \mathbf{Q}) \cdot \mathbf{Q}`$, where $`\mathbf{V}_{p}`$ and $`\mathbf{V}_{curr}`$ the $`3N`$-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
 
@@ -249,7 +367,7 @@ $$
 E_k = \frac{1}{2} \mathbf{V}_{p}^T \mathbf{M}\ \mathbf{V}_p
 $$
 
-where $`\mathbf{M}`$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($E_k$) is adjusted to the desired excitation level ($E_{exc}$) by modifying the atomic velocities so $`\mathbf{V}_{new} = \mathbf{V}_{curr} + (\mathbf{V}_{exc} - \mathbf{V}_{p})`$.
+where $`\mathbf{M}`$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($`E_k`$) is adjusted to the desired excitation level ($`E_{exc}`$) by modifying the atomic velocities so $`\mathbf{V}_{new} = \mathbf{V}_{curr} + (\mathbf{V}_{exc} - \mathbf{V}_{p})`$.
 
 With this procedure, the system is kept in a continuous excited state, allowing an effective small, "adiabatic-like" energy injection. The energy injection control is done by projecting the velocities computed during the simulation onto the excited vector, thus obtaining and rescaling the kinetic energy corresponding to it.
 
@@ -276,6 +394,8 @@ $$
 
 The default value for $`\ell_c`$ is $`0.5 m^{1/2} Å`$ (with $`m`$ being atomic mass unit), and for $`\alpha`$ is $`60°`$.
 
+**Note on `--recalc` and reproducibility:** when `--recalc` is set, reaching this threshold triggers a full ENM recomputation from the current structure (`SimulationRunner._recompute_enm_modes`) followed by a *brand-new random* linear combination of the recomputed modes, rather than the deterministic displacement-based correction above. This random re-combination is independent of the `-seed`/`--seed` flag described in [Uniform Normal Modes Combination](#normal-modes-linear-combination) and is not currently reproducible run-to-run — by design, since its purpose is to re-diversify the excitation direction after the mode subspace itself has changed.
+
 [Back to top ↩](#)
 * ****
 
@@ -294,8 +414,11 @@ Uses physical force-field based normal modes computed in *[CHARMM](https://www.c
 One can easily setup and run an Adaptive MDeNM simulation using pyadmd.
 The configuration process is straightforward. Some technical aspects will be covered in this section in order to facilitate the method comprehension.
 
+## Normal Modes Selection
+Choosing which normal mode to include in the `pyadmd` calculation is crucial for the expected result. We strongly recommend first calculating the ENM modes (`pyadmd enm`), examining them carefully, and then proceeding with the workflow using the `pyadmd run` command. From an exploratory perspective, the collectivity data derived from ENM calculations can provide insights into the importance or dominance of each normal mode within the system's overall dynamics. However, there are phenomena where a specific mode (or set of modes) is better suited to explain the particular conformational transitions involved.
+
 ## Energy injection
-The excitation time of Adaptive MDeNM is $`0.2~ps`$. This means that every $`0.2~ps`$ the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of $`2~kcal/mol`$ is sufficient to achieve a large exploration of the conformational space ($5~kcal/mol`$ if Cα-only ENM).
+The excitation time of Adaptive MDeNM is $`0.2~ps`$. This means that every $`0.2~ps`$ the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of $`2~kcal/mol`$ is sufficient to achieve a large exploration of the conformational space ($`10~kcal/mol`$ if Cα-only ENM).
 
 ## Simulation time
 The total simulation time may require a tuning depending on the system size, energy injection and nature of the motion being excited. Considering a large scale global motion, there is a trade-off between the energy injection and the total simulation time. Larger amounts of energy allows a shorter simulation time, however, this may not be advised as discussed above.
@@ -328,6 +451,8 @@ Create an atom selection to apply the energy injection using *[MDAnalysis select
 
 - **`-rep`/`--replicas`**: Number of replicas to run (**optional**. Default: **`10`**)
 
+- **`-seed`/`--seed`**: Random seed for the uniform mode-combination generation (the repulsion-algorithm initialization described in [Uniform Normal Modes Combination](#uniform-normal-modes-combination)) (**optional**. Default: **`42`**). Fixing this makes `run` reproducible: identical CLI arguments always produce identical excitation vectors and `factors.csv`. Pass a different value to obtain an independent replicate ensemble. Does **not** affect the `--recalc` mid-simulation re-excitation, which remains stochastic by design — see [Excitation Direction Update](#excitation-direction-update).
+
 ### Files
 `pyadmd run` automatically creates the `inputs/` directory in the current
 working directory (if it doesn't already exist) and copies every file listed
@@ -353,7 +478,7 @@ below into it.
 
 - **`-f`/`--fixed`**: Disable excitation vector correction and keep constant excitation energy injections
 
-- **`-r`/`--recalc`**: Recompute ENM modes instead of correcting the excitation vector direction
+- **`-r`/`--recalc`**: Recompute ENM modes instead of correcting the excitation vector direction. **Note:** the new mode combination generated after each recomputation is drawn from a fresh random unit vector and is not controlled by `-seed`/`--seed` — see [Excitation Direction Update](#excitation-direction-update).
 
 - **`--full_ener`**: Write per-term energy decomposition (BOND, ANGLE, DIHED, IMPRP, CMAP, UBREY, NBFIX, NONBONDED, etc.) to `rep{N}_ener_decomp.log` every cycle
 
@@ -391,10 +516,89 @@ Each analysis step can be independently disabled. When skipped, that metric will
 - **`--no_sasa`**: Skip SASA and hydrophobic exposure calculation
 - **`--no_rmsf`**: Skip  RMSF calculation
 - **`--no_dssp`**: Skip secondary structure analysis via DSSP
-- **`--no_dccm`**: Skip dCCM (dynamic cross-correlation matrix) calculation
+- **`--no_dccm`**: Skip DCCM (dynamic cross-correlation matrix) calculation
 - **`--no_lmi`**: Skip LMI (Linear Mutual Information) calculation
 
 **Note:** Before analysis, the program checks if `pyadmd` or `fel` calls are properly completed. If any unit (pyAdMD replica or free energy centroid) hasn't finished running, `analyze` prints a warning listing the incomplete units and their cycles completed/target, but proceeds anyway — see [Handling Incomplete Units](#handling-incomplete-units) below.
+
+## ENM
+### Parameters
+- **`-i`/`--input`**: Input PDB file (**required**, unless **`-w`/`--write_modes`** is used)
+
+- **`-o`/`--output`**: Output folder name (**optional**. Default: **`output`**)
+
+- **`-m`/`--model`**: Model type, **`CA`** (Cα-only) or **`HEAVY`** (heavy atoms) (**optional**. Default: **`CA`**). Unlike `run`'s `-m`/`--model`, **`CHARMM`** is not a valid choice here — `enm` only computes ENM normal modes, not CHARMM-derived ones.
+
+- **`-sel`/`--selection`**: Atom selection applied to the input PDB before building the ENM (**optional**. Default: **`"protein"`**). Must be written between quotes if it contains spaces, per [MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html).
+
+- **`-c`/`--cutoff`**: Interaction cutoff distance, in Å (**optional**. Default: **`15.0`** for CA, **`12.0`** for HEAVY)
+
+- **`-k`/`--spring_constant`**: ENM harmonic spring constant, in kcal/mol/Å² (**optional**. Default: **`1.0`**)
+
+- **`--max_modes`**: Number of non-rigid-body vibrational modes to compute (**optional**. Default: **`50`**)
+
+- **`--output_modes`**: Number of modes (file-labeled 1 through N, where label 1 is the first non-rigid mode) to write vectors/trajectories for (**optional**. Default: **`10`**)
+
+### Skip Flags
+Collectivity, contributions, RMSF, DCCM, and mode vector/trajectory writing can each be independently disabled:
+
+- **`--no_nm_vec`**: Skip writing mode vectors (`.xyz`)
+- **`--no_nm_trj`**: Skip writing mode trajectories (`_traj.pdb`)
+- **`--no_collectivity`**: Skip mode collectivity calculation
+- **`--no_contributions`**: Skip the variance-contributions plot
+- **`--no_rmsf`**: Skip the NMA-predicted RMSF plot (analytical, from the harmonic approximation — not derived from an MD trajectory; see [Analysis](#analysis-1) for the trajectory-based RMSF computed elsewhere in the package)
+- **`--no_dccm`**: Skip the NMA-predicted DCCM plot (same analytical distinction as RMSF above)
+- **`--no_gpu`**: Disable GPU acceleration
+
+### Post-hoc Mode Re-writer
+- **`-w`/`--write_modes`**: Write mode vectors/trajectories from a previously completed `enm` run's saved `*_modes.npy`/`*_frequencies.npy`/structure PDB, without recomputing the ENM. Accepts comma-separated integers and inclusive ranges (`start:end`), *e.g.* `"26,41"`, `"7:10"`, `"42,44:50"`. Requires **`-o`/`--output`** pointing to an existing `enm` output directory.
+
+**Note on mode-file resolution:** `pyadmd enm`'s mode vector/trajectory files (`_mode_{N}.xyz`/`_mode_{N}_traj.pdb`) are written at the ENM's **native reduced resolution** (Cα-only or heavy-atom only, matching whatever the modes were computed on).
+
+## Output Structure
+### Directory Organization
+```
+enm_output/
+├── {base_name}_{model}_structure.pdb      # reduced‑resolution structure (Cα or heavy atoms)
+├── {base_name}_{model}_frequencies.npy    # vibrational frequencies (filtered, non‑rigid modes)
+├── {base_name}_{model}_modes.npy          # eigenvector matrix (filtered, non‑rigid modes)
+├── collectivity.csv                       # per‑mode collectivity (κ) and frequency (cm⁻¹) (omitted with --no_collectivity)
+├── mode_contributions.png                 # per‑mode and cumulative variance contributions (omitted with --no_contributions)
+├── rmsf_plot.png                          # NMA‑predicted residue RMSF (harmonic approximation) (omitted with --no_rmsf)
+├── dccm_plot.png                          # NMA‑predicted residue cross‑correlation matrix (omitted with --no_dccm)
+├── dccm_matrix.npy                        # raw NMA‑DCCM matrix (omitted with --no_dccm)
+├── {base_name}_{model}_mode_{N}.xyz       # displacement vector of mode N (XYZ format) (omitted with --no_nm_vec)
+└── {base_name}_{model}_mode_{N}_traj.pdb  # oscillatory PDB trajectory along mode N (multi‑model) (omitted with --no_nm_trj)
+```
+
+
+**Notes:**  
+- `{base_name}` is the stem of the input PDB file (e.g., `system`).
+- `{model}` is either `ca` (Cα‑only) or `heavy` (heavy atoms).
+- The mode vector and trajectory files are written only for the modes specified by `‑‑output_modes` (default: first 10 non‑rigid modes).
+- The `-w` / `‑‑write_modes` option re‑uses an existing output directory to write **additional** mode files (vectors/trajectories) without recomputing the ENM.
+
+### Output Files Description
+
+1. **Core Data Files**  
+   - **`{base_name}_{model}_structure.pdb`**: PDB file containing only the atoms that participated in the ENM (Cα or heavy atoms). Used as the reference for mode vector/trajectory writing and for RMSF/DCCM plotting.
+   - **`{base_name}_{model}_frequencies.npy`**: 1D array of vibrational frequencies (in internal angular units, sorted ascending) after removing the six rigid‑body modes.
+   - **`{base_name}_{model}_modes.npy`**: 2D array of shape `(3N, M)`, where column `i` is the mass‑weighted eigenvector for mode `i` (matching the order of `frequencies`). These two NumPy files enable fast post‑hoc re‑writing of vectors/trajectories via `-w`.
+
+2. **Collectivity and Variance Contributions**  
+   - **`collectivity.csv`**: CSV with columns `Mode`, `Frequency (cm⁻¹)`, and `Collectivity`. Omitted with `‑‑no_collectivity`.
+   - **`mode_contributions.png`**: Two‑panel figure showing (left) the proportion of total mean‑square fluctuation contributed by each of the first `‑‑max_modes` non‑rigid modes (proportional to `1/λ_k` under equipartition), and (right) the cumulative fraction. Omitted with `‑‑no_contributions`.
+
+3. **NMA‑Predicted RMSF and DCCM**  
+   - **`rmsf_plot.png`**: Residue‑averaged root‑mean‑square fluctuation (Å) derived from the harmonic approximation. The plot is based on the sum over modes of `(kBT/λ_k) * |u_i^(k)|² / m_i`. Omitted with `‑‑no_rmsf`.
+   - **`dccm_plot.png`**: DCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
+   - **`dccm_matrix.npy`**: Raw correlation matrix, saved alongside the plot. Both are omitted with `‑‑no_dccm`.
+
+4. **Mode‑Specific Vector and Trajectory Files**  
+   - **`{base_name}_{model}_mode_{N}.xyz`**: XYZ‑formatted file listing the displacement vector for mode `N`. The header includes the mode frequency in cm⁻¹. Omitted with `‑‑no_nm_vec`.
+   - **`{base_name}_{model}_mode_{N}_traj.pdb`**: Multi‑model PDB showing a smooth oscillation along mode `N`. The trajectory is mass‑weighted and scaled to a peak amplitude (default 4 Å). Omitted with `‑‑no_nm_trj`.
+
+**Note:** When using the post‑hoc mode re‑writer (`pyadmd enm -w "..." -o enm_output`), only the mode‑specific vector and trajectory files are newly written for the requested modes; all other files (core data, collectivity, plots) are left untouched and must already exist from a previous full ENM run.
 
 [Back to top ↩](#)
 * ****
@@ -415,7 +619,6 @@ The **`fel`** subcommand computes a free energy landscape (FEL) from a completed
 - **Free to change**: `-c`/`--cutoff` and `-d`/`--deexcite`. Changing the cutoff only affects the re-thresholding of the cached pairwise-RMSD matrix. Changing the de-excitation length only affects newly-created centroids going forward; existing centroids keep whatever de-excitation they originally had and are simply extended in production.
 - **Must stay the same**: `-s`/`--sel`, `-T`/`--temp`. Mixing clustering selections or temperatures inside one pooled FEL is not physically valid.
 - **Never shrinks existing work**: if `--max_centroids` or `-p`/`--production` is *smaller* than the previous call, the program warns and uses the larger of the two values instead. We suggest start with smaller values and append more data, if necessary.
-
 
 ## Output Structure
 ### Directory Organization
@@ -468,9 +671,9 @@ The PyAdMD **`analysis`** module provides comprehensive analysis capabilities fo
 
 6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
 
-7. **Dynamic Cross-Correlation Matrix (dCCM):** Measures pairwise linear correlation of Cα residue motions after Kabsch superposition to remove rigid-body rotation/translation. Values range from +1 (fully correlated motion) through 0 (uncorrelated) to −1 (fully anti-correlated motion), useful for identifying coupled domains, allosteric communication paths, and correlated/anti-correlated collective motions.
+7. **Dynamic Cross-Correlation Matrix (DCCM):** Measures pairwise linear correlation of Cα residue motions after Kabsch superposition to remove rigid-body rotation/translation. Values range from +1 (fully correlated motion) through 0 (uncorrelated) to −1 (fully anti-correlated motion), useful for identifying coupled domains, allosteric communication paths, and correlated/anti-correlated collective motions.
 
-8. **Linear Mutual Information (LMI):** An alternative, signless measure of residue-residue coupling strength (range [0, 1]) computed via the Gaussian approximation of generalized correlation. Unlike dCCM, LMI reports strongly anti-correlated motion with the same high value as strongly correlated motion, since it measures total coupling rather than its direction.
+8. **Linear Mutual Information (LMI):** An alternative, signless measure of residue-residue coupling strength (range [0, 1]) computed via the Gaussian approximation of generalized correlation. Unlike DCCM, LMI reports strongly anti-correlated motion with the same high value as strongly correlated motion, since it measures total coupling rather than its direction.
 
 ## Analysis Modes
 ### Standard Analysis
@@ -527,8 +730,8 @@ analysis/{fel/}
 ├── hydrophobic_exposure_plot.png         # Hydrophobic exposure plot (omitted with --no_sasa)
 ├── rmsf_average.png                      # Average RMSF plot (omitted with --no_rmsf)
 ├── secondary_structure_average.png       # Average secondary structure plot (omitted with --no_dssp)
-├── dccm_average.png                      # Average dCCM heatmap (omitted with --no_dccm)
-├── dccm_average.npy                      # Average dCCM matrix, raw (omitted with --no_dccm)
+├── dccm_average.png                      # Average DCCM heatmap (omitted with --no_dccm)
+├── dccm_average.npy                      # Average DCCM matrix, raw (omitted with --no_dccm)
 ├── lmi_average.png                       # Average LMI heatmap (omitted with --no_lmi)
 ├── lmi_average.npy                       # Average LMI matrix, raw (omitted with --no_lmi)
 └── {rep[1-N]}/ or {centroid_frame[F]}/   # Unit-specific directories
@@ -540,8 +743,8 @@ analysis/{fel/}
     ├── hydrophobic_exposure_plot.png     # Unit-specific hydrophobic exposure plot (omitted with --no_sasa)
     ├── rmsf_plot.png                     # Unit-specific RMSF plot (omitted with --no_rmsf)
     ├── secondary_structure.png           # Unit-specific secondary structure plot (omitted with --no_dssp)
-    ├── dccm_matrix.npy                   # Unit-specific dCCM matrix, raw (omitted with --no_dccm)
-    ├── dccm_plot.png                     # Unit-specific dCCM heatmap (omitted with --no_dccm)
+    ├── dccm_matrix.npy                   # Unit-specific DCCM matrix, raw (omitted with --no_dccm)
+    ├── dccm_plot.png                     # Unit-specific DCCM heatmap (omitted with --no_dccm)
     ├── lmi_matrix.npy                    # Unit-specific LMI matrix, raw (omitted with --no_lmi)
     └── lmi_plot.png                      # Unit-specific LMI heatmap (omitted with --no_lmi)
 ```
@@ -558,8 +761,8 @@ analysis/{fel/}
 - Average plots across all units
 
 3. **Correlation Matrix Files**
-- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) dCCM matrix, values in [-1, 1]. Omitted with `--no_dccm`.
-- **`dccm_plot.png`** / **`dccm_average.png`**: dCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
+- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) DCCM matrix, values in [-1, 1]. Omitted with `--no_dccm`.
+- **`dccm_plot.png`** / **`dccm_average.png`**: DCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
 - **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in [0, 1]. Omitted with `--no_lmi`.
 - **`lmi_plot.png`** / **`lmi_average.png`**: LMI heatmap, sequential colormap (LMI has no sign).
 
@@ -644,6 +847,14 @@ pyadmd fel -c 2 -p 100
 ```
 pyadmd fel -c 2 -p 500 --max_centroids 100
 ```
+## Compute a standalone ENM (Cα model, writing modes 7-16)
+```
+pyadmd enm -i tutorial/system.pdb -o enm_output -m CA
+```
+## Re-write additional modes from a previous ENM run
+```
+pyadmd enm -w "15,20:22" -o enm_output
+```
 ## Clean previous setup files
 ```
 pyadmd clean
@@ -668,12 +879,6 @@ repository root:
 pip install .
 ```
 
-or, for an editable/development install:
-
-```
-pip install -e .
-```
-
 `pyadmd` requires a CUDA-enabled GPU. Two dependencies need to be told about
 your CUDA toolkit version — both default to CUDA 12.x here:
 
@@ -693,15 +898,6 @@ via conda instead (`conda install -c conda-forge openmm`, which supports
 older CUDA versions), then `pip install` the rest of `pyadmd`'s dependencies
 into that environment. Either way, also swap `cupy-cuda12x>=13.6` for
 `cupy-cuda11x>=13.6` in `pyproject.toml`.
-
-**Note:** if you're installing from [TestPyPI](https://test.pypi.org/project/pyadmd/)
-(*e.g.* to dry-run a pre-release), resolve dependencies against real PyPI as a
-fallback, since TestPyPI does not mirror the full package ecosystem:
-```
-pip install --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    pyadmd
-```
 
 # Dependencies
 Python dependencies are declared in `pyproject.toml` and installed automatically

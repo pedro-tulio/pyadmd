@@ -33,7 +33,7 @@ class ModeExciter:
 
     def generate_factors(self, P: int, N: int, cwd: str, nm_parsed: List[int],
                          nm_type: str, base_name: str,
-                         mda_U: mda.Universe) -> np.ndarray:
+                         mda_U: mda.Universe, seed: int = 42) -> np.ndarray:
         """
         Generate equidistant excitation vectors using a geometry-aware repulsion algorithm.
 
@@ -57,6 +57,12 @@ class ModeExciter:
                 (e.g. ``"system"`` → ``inputs/system_enm/system_ca_mode_7.xyz``).
                 Replaces the former ``coorfile`` parameter.
             mda_U (mda.Universe): MDAnalysis Universe for reference structure atom count.
+            seed (int): Random seed for the initial-coordinate draw used to start the
+                repulsion algorithm (only relevant when ``P != 2N``, since the
+                ``P == 2N`` cross-polytope path is already deterministic). Fixing this
+                makes ``generate_factors`` reproducible across runs with identical
+                arguments; pass a different value to obtain an independent
+                excitation-vector ensemble. Default: 42.
 
         Returns:
             numpy.ndarray: Combined mode vectors, shape (P, natom, 3), where natom is
@@ -104,7 +110,12 @@ class ModeExciter:
             # Cross-polytope vertices: already maximally separated, skip repulsion
             coords = np.vstack((np.eye(N), -np.eye(N)))
         else:
-            coords = np.random.normal(size=(P, N))
+            # Seeded RNG: makes the starting configuration (and therefore the
+            # converged repulsion result) reproducible across runs with the
+            # same arguments, instead of drawing from the global unseeded
+            # NumPy RNG state.
+            rng = np.random.default_rng(seed)
+            coords = rng.normal(size=(P, N))
             coords /= np.linalg.norm(coords, axis=1, keepdims=True)
 
             prev_max_force = float('inf')

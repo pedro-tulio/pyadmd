@@ -617,8 +617,8 @@ class FreeEnergyCalculator:
         sel      = merged_u.select_atoms(self.cluster_sel_str)
         n_sel    = sel.n_atoms
 
-        frame_indices = np.arange(0, n_frames, self._CLUSTER_STRIDE)
-        n_sampled     = len(frame_indices)
+        # Compute number of sampled frames using the stride
+        n_sampled = (n_frames + self._CLUSTER_STRIDE - 1) // self._CLUSTER_STRIDE
 
         print(f"{self.console.PGM_NAM}Accumulating positions: "
               f"{self.console.EXT}{n_sampled}{self.console.STD} frames "
@@ -626,8 +626,11 @@ class FreeEnergyCalculator:
               f"{self.console.EXT}{n_frames}{self.console.STD} total, "
               f"{self.console.EXT}{n_sel}{self.console.STD} atoms)...")
         positions = np.empty((n_sampled, n_sel, 3), dtype=np.float32)
-        for i, orig_idx in enumerate(frame_indices):
-            merged_u.trajectory[orig_idx]
+        frame_indices = np.empty(n_sampled, dtype=np.int64)
+
+        # Use slicing to iterate only over every _CLUSTER_STRIDE-th frame
+        for i, ts in enumerate(merged_u.trajectory[::self._CLUSTER_STRIDE]):
+            frame_indices[i] = ts.frame
             positions[i] = sel.positions.copy()
 
         print(f"{self.console.PGM_NAM}Computing pairwise RMSD matrix "
@@ -1078,7 +1081,7 @@ class FreeEnergyCalculator:
     # Frame stride used when accumulating positions for GROMOS clustering
     # Every _CLUSTER_STRIDE-th frame is kept, reducing the RMSD matrix by
     # the stride² without significant loss of conformational coverage
-    _CLUSTER_STRIDE: int = 2
+    _CLUSTER_STRIDE: int = 3
 
     # Exact production-end checkpoint
     _PROD_CHECKPOINT_FILE: str = "prod_checkpoint.chk"
