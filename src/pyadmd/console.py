@@ -53,7 +53,7 @@ class ConsoleConfig:
     ░░░░░       ░░░░░░
     '''
 
-    VERSION = '3.2.1'
+    VERSION = '3.2.2'
     CITATION = '''  Please cite:
 
     \tAdaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein Conformational Space

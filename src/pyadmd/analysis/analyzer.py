@@ -507,7 +507,7 @@ class Analyzer:
         Analyze all fel centroid production trajectories and generate plots.
 
         Mirrors ``analyze_all_replicas``, but the analysis units are
-        fel centroids (``fel/centroids/centroid_frame{F}/prod.dcd``)
+        fel centroids (``fel/centroids/centroid_frame{F}/centroid_{F}.dcd``)
         instead of pyadmd replicas, and the shared (target) time axis is the
         ``production_ps`` value already recorded in
         ``fel/run_metadata.json`` (playing the role
@@ -585,7 +585,7 @@ class Analyzer:
         # Discover centroid production trajectories, sorted by frame index
         centroid_pattern = re.compile(r"centroid_frame(\d+)")
         centroid_dcds = sorted(
-            glob.glob(f"{cwd}/fel/centroids/centroid_frame*/prod.dcd"),
+            glob.glob(f"{cwd}/fel/centroids/centroid_frame*/centroid_*.dcd"),
             key=lambda p: int(centroid_pattern.search(p).group(1))
         )
 
@@ -708,7 +708,8 @@ class Analyzer:
         ``_analyze_replica_parallel``.
 
         Args:
-            dcd_file (str): Absolute path to the centroid's prod.dcd file.
+            dcd_file (str): Absolute path to the centroid's production DCD
+                file (``centroid_{F}.dcd``).
             psf_file (str): Absolute path to the shared PSF topology file.
             frame_idx (int): Centroid frame index, echoed in the return value.
             sim_time (float): Shared target production time in picoseconds

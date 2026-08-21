@@ -635,7 +635,8 @@ fel/
 ├── fel_summary.html                        # HTML summary report
 └── centroids/
     └── centroid_frame[F]/                  # one directory per centroid, named by frame index
-        ├── prod.dcd                        # production trajectory (appended to on extension)
+        ├── centroid_[F].dcd                # production trajectory (appended to on extension)
+        ├── centroid_[F].log                # production logfile (appended to on extension)
         ├── prod_checkpoint.chk             # exact final state, for bit-identical extension
         └── checkpoint.chk                  # periodic (every 10 cycles) checkpoint
 ```
