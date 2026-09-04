@@ -327,23 +327,6 @@ class FreeEnergyCalculator:
         Compare this call's parameters against the previous ``fel``
         run (if any) and resolve the effective values.
 
-        - ``-s/--sel`` and ``-T/--temp`` are hard-gated: a mismatch prints a
-          clear diff and exits, since mixing selections or temperatures in
-          one pooled free energy landscape is not physically valid.
-        - ``--max_centroids`` and ``-p/--production`` are soft-gated:
-          existing work is never shrunk, so the larger of the previous and
-          current value is used, with a warning if the requested value was
-          smaller.
-        - ``-c/--cutoff`` and ``-d/--deexcite`` are informational only: a
-          note is printed if they changed, but nothing is blocked or
-          overridden (cutoff only affects the re-thresholding of the cached
-          RMSD matrix; deexcite only affects newly-created centroids going
-          forward).
-
-        On a first run (no previous metadata), simply save the current
-        parameters and returns. Otherwise save the resolved parameters
-        at the end.
-
         Raises:
             SystemExit: If ``-s/--sel`` or ``-T/--temp`` differ from the
                 previous run.
@@ -428,10 +411,6 @@ class FreeEnergyCalculator:
         """
         Concatenate all replica DCD files into a single MDAnalysis Universe.
 
-        Scans ``rep1`` through ``rep{self.replicas}`` for a ``rep{N}.dcd``
-        trajectory file, skipping any replica whose DCD is missing, and loads
-        the found files as frames of a single merged pseudo-trajectory.
-
         Returns:
 
             MDAnalysis.Universe: Universe built from the PSF topology and the
@@ -446,15 +425,6 @@ class FreeEnergyCalculator:
         """
         Return the total merged-trajectory frame count without building an
         MDAnalysis Universe.
-
-        Mirrors ``merge_trajectories``'s file-discovery logic (same
-        ``rep{N}/rep{N}.dcd`` scan, same "skip if missing" behavior) but
-        sums each file's frame count via the header-only
-        ``_count_dcd_frames`` instead of opening/concatenating the
-        trajectories. This gives the same ``n_merged_frames`` value
-        ``merge_trajectories`` + ``len(u.trajectory)`` would produce, cheaply
-        enough to use as a cache-validity check before deciding whether
-        ``merge_trajectories`` needs to run at all.
 
         Returns:
             int: Total frame count across all existing replica DCDs.
@@ -471,21 +441,6 @@ class FreeEnergyCalculator:
     def cluster_gromos(self, merged_u):
         """
         Cluster frames using the GROMOS algorithm on Cα RMSD.
-
-        This is a thin orchestrator over three stages, split so that the
-        expensive part (the pairwise RMSD matrix) can be cached and reused
-        across ``fel`` invocations even when ``--cutoff`` or
-        ``--max_centroids`` change:
-
-          1. ``_get_or_build_rmsd_matrix``: reuse the cached pairwise RMSD
-             matrix when valid for the current clustering selection and
-             merged-trajectory frame count, otherwise compute and cache it.
-          2. ``_gromos_threshold``: neighbor-counting/greedy-pick
-             clustering over the (cached or fresh) matrix, always re-run
-             with the *current* ``self.cutoff``.
-          3. ``_select_diverse_centroids``: greedy farthest-point (MaxMin)
-             selection, always re-run with the *current* ``self.max_centroids``,
-             only if needed.
 
         Args:
             merged_u (MDAnalysis.Universe): Merged pseudo-trajectory produced
@@ -525,10 +480,6 @@ class FreeEnergyCalculator:
         """
         GROMOS neighbor-counting/greedy-pick clustering over an pairwise RMSD matrix.
 
-        Contains no distance computation so it is inexpensive to re-run on every
-        ``fel`` call with whatever ``self.cutoff`` is currently set, even when
-        the RMSD matrix itself came from a cache built under a different cutoff.
-
         Args:
             rmsd_matrix (numpy.ndarray): (n_sampled, n_sampled) pairwise
                 RMSD matrix in Å, as produced by
@@ -556,10 +507,7 @@ class FreeEnergyCalculator:
         clusters    = []
         n_remaining = n_sampled
         while n_remaining > 0:
-            # argmax restricted to the active pool: inactive points are
-            # masked to -1 (neighbor_counts are always >= 1, since every
-            # point neighbors itself, so -1 never wins). np.argmax returns
-            # the first/smallest-index occurrence of the max.
+            # argmax restricted to the active pool
             masked_counts    = np.where(active, neighbor_counts, -1)
             centroid_sampled = int(np.argmax(masked_counts))
             centroid_global  = int(frame_indices[centroid_sampled])
@@ -575,10 +523,10 @@ class FreeEnergyCalculator:
             })
 
             # Decrement remaining points' neighbor counts by however many of
-            # the just-removed members they were counting as neighbors, then
-            # deactivate the removed members.
+            # the just-removed members they were counting as neighbors
             neighbor_counts -= adjacency[:, members].sum(axis=1)
             active[members]  = False
+            # deactivate the removed members.
             n_remaining     -= members.size
 
         clusters.sort(key=lambda c: c['size'], reverse=True)
@@ -589,14 +537,6 @@ class FreeEnergyCalculator:
         Return the pairwise RMSD matrix over subsampled frames, reusing a
         cached one when it is still valid, otherwise computing and caching
         a fresh one.
-
-        The matrix depends only on the clustering selection
-        (``self.cluster_sel_str``), the subsampling stride
-        (``self._CLUSTER_STRIDE``), and the set of frames in the merged
-        pseudo-trajectory - it does **not** depend on ``--cutoff`` or
-        ``--max_centroids``, both of which are applied afterwards on the
-        thresholding/selection stages. This lets ``--cutoff`` change
-        between ``fel`` calls without repeating the RMSD computation.
 
         Args:
             merged_u (MDAnalysis.Universe): Merged pseudo-trajectory produced
@@ -645,9 +585,6 @@ class FreeEnergyCalculator:
         """
         Load the cached pairwise RMSD matrix if it is valid for the current
         clustering selection and merged-trajectory frame count.
-
-        Validity is intentionally independent of ``--cutoff`` and
-        ``--max_centroids`` (see ``_get_or_build_rmsd_matrix``).
 
         Args:
             n_merged_frames (int): Current ``len(merged_u.trajectory)``,
@@ -705,9 +642,7 @@ class FreeEnergyCalculator:
 
     def _save_rmsd_cache(self, rmsd_matrix, frame_indices, n_merged_frames):
         """
-        Save the pairwise RMSD matrix and its metadata so future
-        ``fel`` calls with a different ``--cutoff`` or
-        ``--max_centroids`` can skip the RMSD re-computation.
+        Save the pairwise RMSD matrix and its metadata.
 
         Args:
             rmsd_matrix (numpy.ndarray): (n_sampled, n_sampled) pairwise
@@ -743,18 +678,7 @@ class FreeEnergyCalculator:
 
     def _load_clusters_cache(self, n_merged_frames: int) -> Optional[List[Dict[str, Any]]]:
         """
-        Return the cached final cluster list (post-thresholding,
-        post-MaxMin) if it is valid for the *current* clustering selection,
-        cutoff, max_centroids, merged-trajectory frame count, and stride.
-
-        Unlike the RMSD-matrix cache (``_load_rmsd_cache``), this is
-        intentionally gated on ``--cutoff`` and ``--max_centroids`` as well,
-        since those two parameters change which clusters/centroids are
-        selected. When this cache hits, both ``merge_trajectories()`` and
-        ``cluster_gromos()`` can be skipped entirely for the current call -
-        useful when a ``fel`` re-invocation only raises ``-p/--production``
-        (or simply retries incomplete centroid MD) without touching any
-        clustering parameter.
+        Return the cached final cluster list.
 
         Args:
             n_merged_frames (int): Current total merged-trajectory frame
@@ -807,10 +731,7 @@ class FreeEnergyCalculator:
     def _save_clusters_cache(self, clusters: List[Dict[str, Any]],
                              n_merged_frames: int) -> None:
         """
-        Save the final cluster list (post-thresholding, post-MaxMin) so a
-        later ``fel`` call with identical clustering parameters
-        (selection, cutoff, max_centroids, frame count, stride) can skip
-        both ``merge_trajectories()`` and ``cluster_gromos()``.
+        Save the final cluster list.
 
         Args:
             clusters (list[dict]): Final cluster list as returned by
@@ -841,14 +762,6 @@ class FreeEnergyCalculator:
         """
         Select ``max_n`` maximally diverse centroids from a larger cluster list
         using greedy farthest-point (MaxMin) sampling.
-
-        The algorithm seeds with the most-populated centroid (index 0 in the
-        size-sorted list) and then iteratively adds the centroid whose minimum
-        RMSD distance to all already-selected centroids is largest.  This
-        approximates the optimal max-min diverse subset to within a factor of 2.
-
-        After selection the returned list is re-sorted by cluster size (largest
-        first) so that downstream centroid MD follows population order.
 
         Args:
             clusters:    Full list of cluster dicts sorted by size (largest first).
@@ -887,20 +800,7 @@ class FreeEnergyCalculator:
     def _compute_rmsd_matrix_batched(self, positions, batch_size=1024):
         """
         Build the symmetric pairwise RMSD matrix using the Gram-matrix
-        (GEMM) formulation, GPU-accelerated via CuPy with an automatic
-        CPU/BLAS fallback.
-
-        Because this RMSD has no Kabsch superposition, it reduces to a
-        scaled Euclidean distance between flattened per-frame coordinate
-        vectors:
-
-            RMSD_ij = || flat(pos_i) - flat(pos_j) ||_2 / sqrt(n_atoms)
-
-        and the full squared-distance matrix can be obtained from a single
-        matrix multiplication per row-batch (||a-b||^2 = ||a||^2 + ||b||^2
-        - 2 a.b) instead of an O(n^2) elementwise loop. This lets the heavy
-        lifting run as batched GEMM calls, which cuBLAS/BLAS parallelize
-        far more efficiently than the previous nested-loop broadcasting.
+        (GEMM) formulation.
 
         Args:
             positions (numpy.ndarray): (n_frames, n_atoms, 3) array of
@@ -1011,18 +911,6 @@ class FreeEnergyCalculator:
         """
         Build a SystemState from a specific DCD frame.
 
-        Positions come from the frame; velocities are None so that
-        initialize_state() assigns Maxwell-Boltzmann velocities at the
-        simulation temperature. The periodic box is taken from the DCD
-        frame with a fallback to the original XSC file.
-
-        Replica DCDs are written with ``enforcePeriodicBox=False``, so atoms
-        can drift arbitrarily far from the primary unit cell over the course
-        of a multi-ns excitation run. Whole molecules (fragments, determined
-        from PSF bonds) are wrapped back into the box before positions are
-        extracted, which keeps absolute coordinates numerically well-behaved
-        for the centroid MD that follows.
-
         Args:
             merged_u (MDAnalysis.Universe): Merged pseudo-trajectory produced
                 by ``merge_trajectories``.
@@ -1075,16 +963,34 @@ class FreeEnergyCalculator:
         (0.1,   0.0  ),   # phase 4 - nearly free
     ]
 
+    # Mid-phase strain-relief dip target
+    _RELIEF_TARGETS: List[Tuple[float, float]] = [
+        (3.5,  1.75 ),   # phase 1 dip
+        (1.75, 0.875),   # phase 2 dip
+        (0.6,  0.25 ),   # phase 3 dip
+        (0.05, 0.0  ),   # phase 4 dip
+    ]
+
+    # Relief routine: 30% nominal / 20% dip / 30% nominal / 20% dip
+    _RELIEF_NOMINAL_FRACTION: float = 0.30   # each of the two nominal segments
+    _RELIEF_DIP_FRACTION: float = 0.20       # each of the two relief dips
+
     # 1 kcal/mol/Å² → kJ/mol/nm²  (OpenMM internal units)
     _KCAL_A2_TO_KJ_NM2: float = 418.4
 
     # Frame stride used when accumulating positions for GROMOS clustering
-    # Every _CLUSTER_STRIDE-th frame is kept, reducing the RMSD matrix by
-    # the stride² without significant loss of conformational coverage
     _CLUSTER_STRIDE: int = 3
 
     # Exact production-end checkpoint
     _PROD_CHECKPOINT_FILE: str = "prod_checkpoint.chk"
+
+    # Maximum number of alternative member frames to retry if
+    # de-excitation fails
+    _MAX_MEMBER_RETRIES: int = 4
+
+    # Reinforced integrator settings for the escalating last-resort pass
+    _REINFORCED_TIMESTEP_FS: float = 1.0        # finer integrator
+    _REINFORCED_FRICTION_PER_PS: float = 5.0    # stronger friction
 
     # Protein backbone heavy-atom names (CHARMM naming convention)
     _BACKBONE_ATOM_NAMES: set = {'CA', 'C', 'N', 'O', 'OT1', 'OT2', 'OXT'}
@@ -1105,28 +1011,39 @@ class FreeEnergyCalculator:
         * ``k_bb`` - applied to protein backbone heavy atoms (CA, C, N, O, OXT).
         * ``k_sc`` - applied to protein sidechain heavy atoms.
 
-        Both global parameters are initialised to **zero**.  Update them via
-        ``context.setParameter("k_bb", value)`` before each de-excitation phase.
-        Force constants are in kJ/mol/nm² (OpenMM internal units).
-
-        Converting user-facing kcal/mol/Å² to kJ/mol/nm²:
-            k_internal = k_user × 418.4
-
-        The reference positions (``ref_pos_nm``) are the centroid atom
-        coordinates in nm and serve as the equilibrium positions for the
-        harmonic restraints.
-
         Args:
             ref_pos_nm: (N_atoms, 3) array of centroid positions in nm.
 
         Returns:
-            A new ``mm.System`` with the two restraint forces appended.
+            A new ``mm.System`` with the two restraint forces appended and
+            any barostat removed (see note below).
+
+        Note:
+            Combining a Monte Carlo barostat with strong positional
+            restraints is a known source of instability: the barostat's
+            volume-move acceptance is driven by total system energy,
+            including the restraint terms, which do not reflect real
+            physical pressure. This can transiently compress the box while
+            restrained atoms cannot relocate to relieve the resulting
+            overlap, producing a sudden nonbonded clash. Restrained
+            de-excitation is therefore run at constant volume (NVT); any
+            ``MonteCarloBarostat``/``MonteCarloMembraneBarostat`` present
+            on the shared system is stripped from this per-centroid copy
+            only. The unrestrained production phase is built separately
+            from ``self._omm_system`` (see ``_run_centroid_md``) and keeps
+            its barostat, remaining NPT as before.
         """
 
         # Independent copy - leaves self._omm_system untouched
         system_copy = XmlSerializer.deserialize(
             XmlSerializer.serialize(self._omm_system)
         )
+
+        # Remove any barostat: restrained de-excitation runs NVT (see note above)
+        for force_idx in reversed(range(system_copy.getNumForces())):
+            force = system_copy.getForce(force_idx)
+            if isinstance(force, (mm.MonteCarloBarostat, mm.MonteCarloMembraneBarostat)):
+                system_copy.removeForce(force_idx)
 
         # Backbone restraint
         bb_force = mm.CustomExternalForce(
@@ -1179,10 +1096,6 @@ class FreeEnergyCalculator:
         Return the stable, frame-index-keyed directory for one centroid's
         MD output.
 
-        Keying by the centroid's merged-trajectory frame index keeps identity
-        stable across ``fel`` calls even when ``--max_centroids`` or
-        ``--cutoff`` change and reshuffle that ordering.
-
         Args:
             frame_idx (int): Centroid frame index in the merged
                 pseudo-trajectory (``cluster['centroid']``).
@@ -1195,9 +1108,6 @@ class FreeEnergyCalculator:
     def _centroid_prod_dcd_name(self, frame_idx: int) -> str:
         """
         Return the filename (no directory) of a centroid's production DCD.
-
-        Single source of truth for this name so ``_run_centroid_md`` and
-        ``_extend_centroid_production`` never hardcode it independently.
 
         Args:
             frame_idx (int): Centroid frame index in the merged
@@ -1221,8 +1131,96 @@ class FreeEnergyCalculator:
         """
         return f"{self._centroid_dir(frame_idx)}/{self._centroid_prod_dcd_name(frame_idx)}"
 
+    def _select_fallback_members(self, cluster: Dict[str, Any], original_frame: int,
+                                 n: int) -> List[int]:
+        """
+        Select up to n alternative member frames from a GROMOS cluster to
+        retry centroid MD with, if the original centroid frame's
+        restrained de-excitation fails.
+
+        Args:
+            cluster (dict): Cluster dict as returned by cluster_gromos,
+                with a 'members' key (list of global merged-trajectory
+                frame indices, including the centroid itself).
+            original_frame (int): The cluster's centroid frame, excluded
+                from the candidate pool.
+            n (int): Maximum number of fallback frames to return.
+
+        Returns:
+            list[int]: Up to n alternative frame indices, evenly spaced
+                through the member list. Empty if the cluster has no
+                other members.
+        """
+        candidates = [m for m in cluster.get('members', []) if m != original_frame]
+        if not candidates:
+            return []
+        if len(candidates) <= n:
+            return candidates
+        step = len(candidates) / n
+        return [candidates[int(i * step)] for i in range(n)]
+
+    def _run_phase_with_relief(self, engine: OpenMMSimulationEngine, phase_cycles: int,
+                               phase_idx: int, k_bb_kj: float, k_sc_kj: float,
+                               timestep_fs: float = 2.0) -> None:
+        """
+        Step through one restrained de-excitation phase as a fixed
+        4-segment pattern dipping to a gentler restraint level twice
+        per phase for a burst of real dynamics before restoring the
+        phase's nominal level.
+
+        Args:
+            engine (OpenMMSimulationEngine): Engine to step; its context's
+                "k_bb"/"k_sc" global parameters are toggled between the
+                nominal and relief levels.
+            phase_cycles (int): This phase's nominal excitation cycles
+                (excitation-cycle units, i.e. multiplied by ``self.n_steps``
+                to get the phase's total step count at the reference 2 fs
+                timestep).
+            phase_idx (int): 0-based phase index into ``_RESTRAINT_SCHEDULE``/
+                ``_RELIEF_TARGETS``.
+            k_bb_kj (float): This phase's nominal backbone restraint
+                constant, kJ/mol/nm².
+            k_sc_kj (float): This phase's nominal sidechain restraint
+                constant, kJ/mol/nm².
+            timestep_fs (float): The ACTUAL timestep the passed-in
+                ``engine`` was built with (femtoseconds). Defaults to 2.0,
+                the standard value, in which case the total step count
+                reduces to exactly ``phase_cycles * self.n_steps`` as
+                before. When ``engine`` uses a smaller timestep, the step
+                count is scaled up proportionally so this phase still covers
+                the same physical duration in picoseconds.
+        """
+        total_steps = round(phase_cycles * self.n_steps * (2.0 / timestep_fs))
+        if total_steps <= 0:
+            return
+
+        context = engine.simulation.context
+
+        seg_nominal = round(self._RELIEF_NOMINAL_FRACTION * total_steps)
+        seg_dip     = round(self._RELIEF_DIP_FRACTION * total_steps)
+        # Second dip absorbs any rounding remainder so the four segments
+        # always sum to exactly total_steps.
+        seg_dip_2   = total_steps - (2 * seg_nominal) - seg_dip
+
+        k_bb_relief_kcal, k_sc_relief_kcal = self._RELIEF_TARGETS[phase_idx]
+        k_bb_relief_kj = k_bb_relief_kcal * self._KCAL_A2_TO_KJ_NM2
+        k_sc_relief_kj = k_sc_relief_kcal * self._KCAL_A2_TO_KJ_NM2
+
+        segments = [
+            (seg_nominal, k_bb_kj,        k_sc_kj       ),   # 30% nominal
+            (seg_dip,     k_bb_relief_kj, k_sc_relief_kj),   # 20% dip
+            (seg_nominal, k_bb_kj,        k_sc_kj       ),   # 30% nominal
+            (seg_dip_2,   k_bb_relief_kj, k_sc_relief_kj),   # 20% dip (+ rounding remainder)
+        ]
+        for steps, k_bb_val, k_sc_val in segments:
+            if steps <= 0:
+                continue
+            context.setParameter("k_bb", k_bb_val)
+            context.setParameter("k_sc", k_sc_val)
+            engine.simulation.step(steps)
+
     def _run_centroid_md(self, centroid_state: 'SystemState',
-                         frame_idx: int) -> Optional[str]:
+                         frame_idx: int, reinforced: bool = False) -> Optional[str]:
         """
         Run 4-phase restrained de-excitation followed by unrestrained production
         MD from a single centroid structure.
@@ -1233,21 +1231,23 @@ class FreeEnergyCalculator:
           Phase 3 - k_bb = 1.0, k_sc = 0.25  kcal/mol/Å²
           Phase 4 - k_bb = 0.1, k_sc = 0.0   kcal/mol/Å²
 
-        Each phase spans (n_deexcite_ps / 4) ps. Restraint reference positions
-        are the centroid coordinates themselves. No DCD frames are written
-        during de-excitation.
-
-        After de-excitation, the final positions/velocities/box are carried
-        over into a fresh ``Simulation`` built directly from the shared,
-        restraint-free ``self._omm_system``. A  checkpoint (``prod_checkpoint.chk``)
-        is saved immediately after production stepping ends, enabling later appending
-        via ``_extend_centroid_production`` if a subsequent ``fel`` call
-        requests a longer production time.
+        Each phase spans (n_deexcite_ps / 4) ps, internally split into a
+        30% nominal / 20% dip / 30% nominal / 20% dip pattern (see
+        ``_run_phase_with_relief``) rather than held flat throughout.
+        Restraint reference positions are the centroid coordinates
+        themselves. No DCD frames are written during de-excitation.
 
         Args:
             centroid_state: SystemState with centroid positions and box.
             frame_idx: Centroid's merged-trajectory frame index - the
                 stable identifier used to name its output directory.
+            reinforced (bool): If True, the DE-EXCITATION engine only
+                is built with
+                ``_REINFORCED_TIMESTEP_FS``/``_REINFORCED_FRICTION_PER_PS``
+                instead of the standard 2 fs / 1.0 ps⁻¹, for
+                ``run()``'s escalating last-resort pass on centroids that
+                still fail after exhausting all standard-settings
+                cluster-member fallback attempts.
 
         Returns:
             Absolute path to the production DCD, or None on failure.
@@ -1257,6 +1257,9 @@ class FreeEnergyCalculator:
         prev_dir      = os.getcwd()
         os.chdir(centroid_dir)
         prod_dcd_name = self._centroid_prod_dcd_name(frame_idx)
+
+        timestep_fs     = self._REINFORCED_TIMESTEP_FS if reinforced else 2.0
+        friction_per_ps = self._REINFORCED_FRICTION_PER_PS if reinforced else 1.0
 
         try:
             # Build a per-centroid system copy with positional restraint forces
@@ -1271,17 +1274,12 @@ class FreeEnergyCalculator:
                 is_restart=False, full_ener=False, n_steps=self.n_steps,
                 attach_main_dcd=False,   # no frames written during de-excitation
                 file_prefix='centroid_',
+                friction_per_ps=friction_per_ps, timestep_fs=timestep_fs,
             )
             # initialize_state assigns MB velocities when velocities_nm_ps is None
             engine.initialize_state(centroid_state)
 
             # Restrained Energy minimization
-            # Excited-trajectory frames can contain atom clashes or atoms
-            # displaced far from equilibrium, causing NaN forces when MD begins.
-            # A brief energy minimization with the maximum restraints applied
-            # removes these clashes while keeping the structure near the centroid
-            # geometry. Velocities are then reset to Maxwell-Boltzmann at the
-            # target temperature because minimization does not update them.
             k_bb_init = self._RESTRAINT_SCHEDULE[0][0] * self._KCAL_A2_TO_KJ_NM2
             k_sc_init = self._RESTRAINT_SCHEDULE[0][1] * self._KCAL_A2_TO_KJ_NM2
             engine.simulation.context.setParameter("k_bb", k_bb_init)
@@ -1311,8 +1309,9 @@ class FreeEnergyCalculator:
 
                 print(f"{self.console.PGM_NAM}De-excitation phase {self.console.WRN}{phase_idx + 1}{self.console.STD}/{self.console.EXT}4{self.console.STD}: "
                       f"k_bb={self.console.EXT}{k_bb_kcal:.3f}{self.console.STD}, k_sc={self.console.EXT}{k_sc_kcal:.3f}{self.console.STD} kcal/mol/Å² "
-                      f"({self.console.EXT}{phase_ps:.1f}{self.console.STD} ps)...")
-                engine.simulation.step(phase_cycles * self.n_steps)
+                      f"({self.console.EXT}{phase_ps:.1f}{self.console.STD} ps{', REINFORCED' if reinforced else ''})...")
+                self._run_phase_with_relief(engine, phase_cycles, phase_idx, k_bb_kj, k_sc_kj,
+                                            timestep_fs=timestep_fs)
 
             # Carry the de-excited state (positions, velocities, box) over to a
             # fresh, fully unrestrained Simulation
@@ -1349,7 +1348,7 @@ class FreeEnergyCalculator:
             return os.path.join(centroid_dir, prod_dcd_name)
 
         except Exception as exc:
-            print(f"{self.console.PGM_ERR}Centroid (frame {frame_idx}) MD failed: "
+            print(f"{self.console.PGM_ERR}Centroid (frame {self.console.ERR}{frame_idx}{self.console.STD}) MD failed: "
                   f"{self.console.ERR}{exc}{self.console.STD}")
             traceback.print_exc()
             return None
@@ -1360,20 +1359,6 @@ class FreeEnergyCalculator:
         """
         Build a SystemState (positions + box, no velocities) from the last
         frame of a centroid's own production DCD.
-
-        Fallback used by ``_extend_centroid_production`` when no
-        ``prod_checkpoint.chk`` is available (e.g. a centroid produced
-        before this feature existed). Velocities are intentionally left as
-        ``None`` so that ``initialize_state()`` assigns Maxwell-Boltzmann
-        velocities at ``self._temperature``. The appending is then
-        physically valid MD, just not bit-identical to what a checkpoint
-        would give.
-
-        Whole molecules are wrapped back into the primary cell first: like
-        the excited-replica DCDs, the production DCD is written with
-        ``enforcePeriodicBox=False``, so atoms can drift outside the box
-        over a long production run (same reasoning as
-        ``extract_centroid_state``).
 
         Args:
             dcd_filename: DCD filename, resolved relative to the current
@@ -1499,19 +1484,6 @@ class FreeEnergyCalculator:
     def _get_projection_setup(self):
         """
         Resolve Cα selection, reference positions, and normalised mode vectors.
-
-        Reference positions are taken from the saved
-        ``init_reference_positions_ang.npy`` (written at ``run`` time) when
-        available. This makes the FEL projection engine-agnostic: both NAMD
-        and OpenMM input paths produce the same reference file, so no
-        NAMD-binary read is required here. A NAMD-binary fallback is retained
-        for backward compatibility with runs that pre-date the saved
-        reference state feature.
-
-        Mode vector files contain one entry per protein atom in PSF order
-        (written by write_nm_vectors / wrt-nm.mdu). The Cα component is
-        extracted by mapping global Cα indices to positions within the
-        protein-only ordering.
 
         Returns:
             ca_ix_full (numpy.ndarray): (n_ca,) global Cα atom indices in the
@@ -1757,28 +1729,39 @@ class FreeEnergyCalculator:
         Write per-cluster centroid frame index, size, and production status
         to a CSV file.
 
-        ``production_cycles_done``/``production_ps_done`` are queried
-        post-hoc via ``_centroid_done_cycles`` rather than tracked through
-        the run loop, so they reflect the true on-disk state regardless of
-        whether a centroid's MD succeeded or failed this call.
-
         Args:
             clusters (list[dict]): Cluster list returned by ``cluster_gromos``.
             centroid_records (list[dict], optional): Per-centroid status
-                from ``run()`` (keys ``frame``, ``status``). When omitted,
-                ``status`` is reported as ``'n/a'`` (e.g. when this is
-                called outside the normal ``run()`` flow).
+                from ``run()`` (keys ``frame``, ``status``, and, for
+                brand-new centroids that went through the cluster-member
+                fallback path, ``source_frame_used``, ``md_attempts``, the
+                total number of attempts across both the standard and
+                reinforced passes, and ``reinforced``, whether the
+                successful attempt needed the reinforced last-resort pass
+                (reduced timestep, elevated friction; see
+                ``_run_centroid_md``'s ``reinforced`` argument)). Records
+                from the 'skipped'/'extended' branches don't carry these
+                keys; they default to the centroid frame itself,
+                ``md_attempts=1``, and ``reinforced=False`` via
+                ``.get()``, since no substitution/escalation is possible
+                on those paths. When ``centroid_records`` is omitted
+                entirely, ``status`` is reported as ``'n/a'`` (e.g. when
+                this is called outside the normal ``run()`` flow).
         """
-        status_by_frame = {r['frame']: r['status'] for r in (centroid_records or [])}
+        record_by_frame = {r['frame']: r for r in (centroid_records or [])}
         rows = []
         for i, c in enumerate(clusters):
-            frame = c['centroid']
+            frame  = c['centroid']
+            record = record_by_frame.get(frame, {})
             done_cycles = self._centroid_done_cycles(frame)
             rows.append({
                 'cluster_id':               i + 1,
                 'centroid_frame':           frame,
                 'size':                     c['size'],
-                'status':                   status_by_frame.get(frame, 'n/a'),
+                'status':                   record.get('status', 'n/a'),
+                'source_frame_used':        record.get('source_frame_used', frame),
+                'md_attempts':              record.get('md_attempts', 1),
+                'reinforced':               record.get('reinforced', False),
                 'production_cycles_done':   done_cycles,
                 'production_cycles_target': self.n_prod_cycles,
                 'production_ps_done':       round(done_cycles * self.n_steps * 0.002, 3),
@@ -1790,11 +1773,6 @@ class FreeEnergyCalculator:
         """
         Return the number of production cycles already completed for a
         centroid, read directly from its production DCD's frame count.
-
-        One DCD frame corresponds to exactly one production cycle (the
-        DCDReporter period equals ``self.n_steps``), consistent with the
-        DCD-header-driven crash-recovery convention used elsewhere in this
-        module (e.g. ``_count_dcd_frames``, ``find_last_completed_cycle``).
 
         Args:
             frame_idx: Centroid's merged-trajectory frame index - the
@@ -1814,12 +1792,6 @@ class FreeEnergyCalculator:
         Return True if this centroid's production has already reached (or
         exceeded) the *current* target production length
         (``self.n_prod_cycles``).
-
-        Note this is a target-relative check, not merely "has some
-        completed production": once a later ``fel`` call raises
-        ``-p/--production``, a centroid that was previously "complete" can
-        become incomplete again, signaling that it needs to be topped up
-        via ``_extend_centroid_production`` rather than treated as done.
 
         Args:
             frame_idx: Centroid's merged-trajectory frame index - the
@@ -2013,51 +1985,8 @@ class FreeEnergyCalculator:
     def run(self):
         """
         Execute the full free energy protocol.
-
-        Note:
-            Four mechanisms let ``run`` be safely re-invoked after a
-            partial failure or with different (larger) parameters:
-
-            - Clusters cache: ``fel/clustering_clusters_cache.json``
-              is written immediately after the final cluster list (post
-              GROMOS thresholding, post MaxMin selection) is computed. On
-              re-entry, if it is still valid for the current clustering
-              selection, ``--cutoff``, ``--max_centroids``, and
-              merged-trajectory frame count (checked cheaply, from replica
-              DCD headers, via ``_count_merged_frames_cheap`` - no
-              MDAnalysis load), the clusters are reused as-is and both
-              ``merge_trajectories()`` and ``cluster_gromos()`` are skipped
-              entirely. This is what makes a call that only raises
-              ``-p/--production`` (or simply retries incomplete centroid
-              MD) skip re-merging and re-clustering altogether.
-            - RMSD-matrix cache: ``fel/clustering_rmsd_cache.npz``
-              (+ a small ``.json`` metadata sidecar) is written immediately
-              after the pairwise RMSD matrix is computed. On a clusters-cache
-              miss (e.g. ``--cutoff``/``--max_centroids`` changed) but a
-              still-valid clustering selection and merged-trajectory frame
-              count, the O(n²) RMSD computation is skipped and only the
-              cheap GROMOS thresholding and MaxMin selection are re-run with
-              the *current* ``--cutoff``/``--max_centroids``. Delete either
-              cache to force full recomputation (e.g. after changing
-              ``--sel``, or adding/removing replica DCDs).
-            - Centroid identity/completion: each centroid is keyed by its
-              stable merged-trajectory frame index (``centroid_frame{F}/``,
-              see ``_centroid_dir``), not by its position in the current
-              call's selection, so identity survives ``--cutoff``/
-              ``--max_centroids`` changes. Completion is target-relative
-              (``_centroid_is_complete``): a centroid whose production
-              already meets the current ``-p/--production`` target is
-              skipped untouched.
-            - Checkpoint-based extension: a centroid with *some* but
-              insufficient production is topped up by
-              ``_extend_centroid_production``, which resumes from an exact
-              ``prod_checkpoint.chk`` (bit-identical) or, failing that,
-              the last frame of its production DCD (physically valid, not
-              bit-identical), and appends the additional cycles to the
-              existing production trajectory. A centroid with no
-              production yet runs fresh via ``_run_centroid_md`` for the
-              *full* current target.
         """
+
         t0 = time.time()
 
         # 1-2. Merge trajectories + cluster — GROMOS + MaxMin, or reuse a
@@ -2109,6 +2038,10 @@ class FreeEnergyCalculator:
 
             elif done_cycles == 0:
                 # Brand-new centroid: full de-excitation + full target production.
+                # Tries the original centroid frame first; on failure, retries
+                # with up to _MAX_MEMBER_RETRIES alternative member frames from
+                # the same cluster. If ALL of those fail, the same candidate
+                # frames are tried once more with reinforced settings.
                 if merged_u is None:
                     # Clusters came from cache, so the trajectory merge was
                     # skipped above; a fresh centroid needs it now.
@@ -2120,11 +2053,64 @@ class FreeEnergyCalculator:
                       f"{self.console.STD} "
                       f"(frame {self.console.EXT}{frame_idx}{self.console.STD}, "
                       f"cluster size {self.console.WRN}{cluster['size']}{self.console.STD})...")
-                state    = self.extract_centroid_state(merged_u, frame_idx)
-                dcd_path = self._run_centroid_md(state, frame_idx)
+
+                fallback_frames  = self._select_fallback_members(
+                    cluster, frame_idx, self._MAX_MEMBER_RETRIES)
+                candidate_frames = [frame_idx] + fallback_frames
+
+                dcd_path          = None
+                source_frame_used = frame_idx
+                reinforced_used   = False
+                attempts          = 0
+
+                for reinforced_pass in (False, True):
+                    if dcd_path is not None:
+                        break
+                    if reinforced_pass:
+                        print(f"{self.console.PGM_WRN}Centroid (frame "
+                              f"{self.console.WRN}{frame_idx}{self.console.STD}) failed all "
+                              f"{self.console.WRN}{attempts}{self.console.STD} standard-settings "
+                              "attempt(s); retrying the same candidate frame(s) with "
+                              f"{self.console.EXT}reinforced{self.console.STD} integrator settings "
+                              f"(timestep={self.console.EXT}{self._REINFORCED_TIMESTEP_FS}{self.console.STD} fs, "
+                              f"friction={self.console.EXT}{self._REINFORCED_FRICTION_PER_PS}{self.console.STD} /ps)...")
+                    for candidate_frame in candidate_frames:
+                        attempts += 1
+                        if candidate_frame != frame_idx or reinforced_pass:
+                            print(f"{self.console.PGM_WRN}Centroid (frame "
+                                  f"{self.console.WRN}{frame_idx}{self.console.STD}) MD attempt "
+                                  f"{self.console.WRN}{attempts}{self.console.STD}: frame "
+                                  f"{self.console.EXT}{candidate_frame}{self.console.STD}"
+                                  f"{', reinforced' if reinforced_pass else ''}...")
+                        state    = self.extract_centroid_state(merged_u, candidate_frame)
+                        dcd_path = self._run_centroid_md(state, frame_idx, reinforced=reinforced_pass)
+                        if dcd_path is not None:
+                            source_frame_used = candidate_frame
+                            reinforced_used   = reinforced_pass
+                            break
+
                 prod_dcd_files.append(dcd_path)
-                centroid_records.append({'frame': frame_idx, 'status': 'fresh',
-                                         'cycles_before': done_cycles})
+                if dcd_path is None:
+                    print(f"{self.console.PGM_ERR}Centroid (frame "
+                          f"{self.console.ERR}{frame_idx}{self.console.STD}) failed after "
+                          f"{self.console.ERR}{attempts}{self.console.STD} total attempt(s) "
+                          "(standard + reinforced passes over the original and all "
+                          "substitute member frame(s)).")
+                    centroid_records.append({'frame': frame_idx, 'status': 'failed',
+                                             'cycles_before': done_cycles,
+                                             'source_frame_used': None,
+                                             'md_attempts': attempts,
+                                             'reinforced': False})
+                else:
+                    tag = 'reinforced, ' if reinforced_used else ''
+                    status = (f'fresh ({tag}original)' if reinforced_used and source_frame_used == frame_idx
+                             else 'fresh' if source_frame_used == frame_idx
+                             else f'fresh ({tag}substitute frame {source_frame_used})')
+                    centroid_records.append({'frame': frame_idx, 'status': status,
+                                             'cycles_before': done_cycles,
+                                             'source_frame_used': source_frame_used,
+                                             'md_attempts': attempts,
+                                             'reinforced': reinforced_used})
 
             else:
                 # Partially complete - append production via checkpoint

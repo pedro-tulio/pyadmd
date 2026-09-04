@@ -77,10 +77,12 @@ def write_charmm_nm(nms_to_write: str, psffile: str, modefile: str, cwd: str) ->
     # Extract CHARMM topology and parameters files
     unzip_file(f"{cwd}/inputs/charmm_toppar.zip", f"{cwd}/inputs")
 
-    # Create input file listing modes to process
-    nms = [f"{t}\n" for t in nms_to_write.split(',')]
+    # Create input file: first line is the number of modes, then the list
+    mode_list = nms_to_write.split(',')
     with open(f"{cwd}/inputs/input.txt", 'w') as input_nm:
-        input_nm.writelines(nms)
+        input_nm.write(f"{len(mode_list)}\n")
+        for t in mode_list:
+            input_nm.write(f"{t}\n")
 
     # Ensure the CHARMM driver script is present in cwd/tools, sourced from
     # the installed package's bundled data rather than a repo-relative folder.

@@ -561,7 +561,7 @@ def cmd_fel(args: Any, console: ConsoleConfig,
     fe_calc.run()
 
 
-def cmd_clean(console: ConsoleConfig, cwd: str, input_dir: str) -> None:
+def cmd_clean(console: ConsoleConfig, cwd: str) -> None:
     """
     Implements ``pyadmd clean``: erase all previous simulation setup and
     output files.
@@ -569,29 +569,16 @@ def cmd_clean(console: ConsoleConfig, cwd: str, input_dir: str) -> None:
     Args:
         console: Console configuration for formatted output.
         cwd: Current working directory.
-        input_dir: ``{cwd}/inputs`` directory path.
     """
     print(f"{console.PGM_NAM}{console.TLE}Clean previous pyAdMD setup files{console.STD}\n")
 
     # Removing previous replicas folders
     files = os.listdir(cwd)
     for item in files:
-        if item.endswith((".json", "summary.txt")):
+        if item.endswith((".json", "summary.txt", ".out")):
              os.remove(os.path.join(cwd, item))
-        if item.startswith(("rep", "analysis", "fel")):
+        if item.startswith(("rep", "analysis", "fel", "tools", "inputs")):
             shutil.rmtree(os.path.join(cwd, item), ignore_errors=True)
-
-    # Removing previous configuration files
-    files = os.listdir(input_dir)
-    for item in files:
-        if item.endswith((".txt", ".out", ".crd", ".psf", ".pdb", ".coor",
-                          ".vel", ".xsc", ".str", ".mod", ".rst", ".npy")):
-            os.remove(os.path.join(input_dir, item))
-        # Removing previous ENM calculations
-        if item.endswith("_enm"):
-            shutil.rmtree(os.path.join(input_dir, item), ignore_errors=True)
-    for item in ("charmm_toppar"):
-            shutil.rmtree(os.path.join(input_dir, item), ignore_errors=True)
 
     print(f"{console.PGM_NAM}Erasing is done.\n")
 
@@ -604,7 +591,7 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
 
     Two mutually exclusive paths:
 
-      - ``-w/--write_modes`` set: re-derive vector/trajectory files from a
+      - ``-w/--write-modes`` set: re-derive vector/trajectory files from a
         previously completed run's saved arrays, without recomputing the
         ENM (``ENMAnalyzer.write_modes_from_files``).
       - Otherwise: run a full ENM computation from ``-i/--input``, save
@@ -623,7 +610,7 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
     """
     analyzer = ENMAnalyzer(console)
 
-    # -w / --write_modes: post-hoc path, no recomputation needed
+    # -w / --write-modes: post-hoc path, no recomputation needed
     if args.write_modes is not None:
         print(f"{console.PGM_NAM}{console.TLE}Write ENM modes from a previous run{console.STD}\n")
         try:
@@ -631,8 +618,8 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
             analyzer.write_modes_from_files(
                 output_folder=args.output,
                 mode_numbers=mode_numbers,
-                write_vectors=not args.no_nm_vec,
-                write_trajectories=not args.no_nm_trj,
+                write_vectors=not args.no_vec,
+                write_trajectories=not args.no_trj,
             )
         except (ValueError, FileNotFoundError) as exc:
             print(f"{console.PGM_ERR}{exc}")
@@ -711,9 +698,9 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
         traceback.print_exc()
         sys.exit(1)
 
-    if args.no_nm_vec and args.no_nm_trj:
+    if args.no_vec and args.no_trj:
         print(f"{console.PGM_NAM}Skipping mode vector/trajectory writing "
-              "(--no_nm_vec and --no_nm_trj both set).")
+              "(--no-vec and --no-trj both set).")
     else:
         # Skip the first 6 trivial ENM modes
         output_modes = min(args.output_modes, n_available)
@@ -722,8 +709,8 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
             analyzer.write_modes_from_files(
                 output_folder=output_folder,
                 mode_numbers=mode_numbers,
-                write_vectors=not args.no_nm_vec,
-                write_trajectories=not args.no_nm_trj,
+                write_vectors=not args.no_vec,
+                write_trajectories=not args.no_trj,
             )
         except (ValueError, FileNotFoundError) as exc:
             print(f"{console.PGM_ERR}{exc}")

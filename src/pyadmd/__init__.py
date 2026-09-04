@@ -9,4 +9,4 @@ environmental resistance. Importantly, aMDeNM requires only an initial structure
 target states, distinguishing it from many biased sampling techniques that rely on predefined target conformations.
 """
 
-__version__ = "3.2.2"
+__version__ = "3.2.3"

@@ -25,7 +25,10 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pyadmd", description=console.MESSAGE)
     subparsers = parser.add_subparsers(dest='option', help='Available commands')
 
-    # RUN subparser
+    #################
+    # RUN subparser #
+    #################
+
     opt_run = subparsers.add_parser('run', help="Setup and run simulations")
 
     # Required arguments for run
@@ -64,68 +67,52 @@ def parse_arguments() -> argparse.Namespace:
     run_optional = opt_run.add_argument_group('Optional arguments')
     run_optional.add_argument('-mod', '--modefile', action="store", type=str,
                              help="CHARMM normal mode file (required when type is CHARMM)")
-    run_optional.add_argument('-nm', '--modes', action="store", type=str, default="7,8,9",
+    run_optional.add_argument('-nm', '--modes', action="store", type=str, default="7,8,9", metavar='MODES',
                              help="Normal modes to excite separated by commas (default: 7,8,9)")
-    run_optional.add_argument('-ek', '--energy', action="store", type=float, default=2,
+    run_optional.add_argument('-ek', '--energy', action="store", type=float, default=2, metavar='KCAL/MOL',
                              help="Excitation energy (default: 2 kcal/mol)")
-    run_optional.add_argument('-t', '--time', action="store", type=int, default=250,
-                             help="Total simulation time (default: 250ps)")
+    run_optional.add_argument('-t', '--time', action="store", type=int, default=250, metavar='PS',
+                             help="Total simulation time (default: 250 ps)")
     run_optional.add_argument('-sel', '--selection', action="store", type=str, default="protein",
                              help="Atom selection to apply the energy injection (default: protein)")
-    run_optional.add_argument('-rep', '--replicas', action="store", type=int, default=10,
+    run_optional.add_argument('-rep', '--replicas', action="store", type=int, default=10, metavar='N',
                              help="Number of aMDeNM replicas to run (default: 10)")
     run_optional.add_argument('-seed', '--seed', action="store", type=int, default=42,
                              help="Random seed for the uniform mode-combination generation (default: 42)")
 
     # Flags for run
     run_flags = opt_run.add_argument_group('Flags')
-    run_flags.add_argument('-n', '--no_correc', action='store_true',
+    run_flags.add_argument('-n', '--no-correc', action='store_true',
                           help='Compute standard MDeNM calculations')
     run_flags.add_argument('-f', '--fixed', action='store_true',
                           help='Disable excitation vector correction and keep constant excitation energy injections')
     run_flags.add_argument('-r', '--recalc', action='store_true',
                           help='Recompute ENM modes instead of correcting excitation direction when needed')
-    run_flags.add_argument('--full_ener', action='store_true',
+    run_flags.add_argument('--full-ener', action='store_true',
                           help='Write per-term energy decomposition (BOND, ANGLE, DIHED, etc.) '
                                'to rep{N}_ener_decomp.log each cycle')
 
-    # RESTART subparser
+
+    #####################
+    # RESTART subparser #
+    #####################
+
     subparsers.add_parser('restart', help="Restart unfinished simulations")
 
-    # APPEND subparser
+
+    ####################
+    # APPEND subparser #
+    ####################
+
     opt_apnd = subparsers.add_parser('append', help="Extend previously computed simulations")
-    opt_apnd.add_argument('-t', '--time', action="store", type=int, required=True, default=100,
-                         help="Simulation time to append (default: 100ps)")
+    opt_apnd.add_argument('-t', '--time', action="store", type=int, required=True, default=100, metavar='PS',
+                         help="Simulation time to append (default: 100 ps)")
 
-    # ANALYSIS subparser
-    opt_analyze = subparsers.add_parser('analyze', help="Analyze simulation results and generate plots")
-    opt_analyze.add_argument('-src', '--source', action="store", type=str.lower,
-                            default="pyadmd", choices=["pyadmd", "fel"],
-                            help="Trajectory source to analyze: 'pyadmd' for rep{N}.dcd "
-                                 "replica trajectories (default), or 'fel' for "
-                                 "centroid production trajectories from a completed "
-                                 "'fel' run")
-    opt_analyze.add_argument('-r', '--rough', action='store_true',
-                            help='Perform rough analysis (every 5ps instead of every frame)')
 
-    # Optional skip flags for analysis
-    analyze_skip = opt_analyze.add_argument_group('Skip flags (disable individual analyses)')
-    analyze_skip.add_argument('--no_rmsd', action='store_true',
-                              help='Skip RMSD calculation')
-    analyze_skip.add_argument('--no_rg', action='store_true',
-                              help='Skip radius of gyration calculation')
-    analyze_skip.add_argument('--no_sasa', action='store_true',
-                              help='Skip SASA and hydrophobic exposure calculation')
-    analyze_skip.add_argument('--no_rmsf', action='store_true',
-                              help='Skip RMSF calculation')
-    analyze_skip.add_argument('--no_dssp', action='store_true',
-                              help='Skip secondary structure (DSSP) calculation')
-    analyze_skip.add_argument('--no_dccm', action='store_true',
-                              help='Skip DCCM (dynamic cross-correlation matrix) calculation')
-    analyze_skip.add_argument('--no_lmi', action='store_true',
-                              help='Skip LMI (Linear Mutual Information) calculation')
+    ###################################
+    # FREE ENERGY LANDSCAPE subparser #
+    ###################################
 
-    # FREE ENERGY LANDSCAPE subparser
     opt_fe = subparsers.add_parser(
         'fel',
         help="Compute free energy landscapes"
@@ -134,8 +121,8 @@ def parse_arguments() -> argparse.Namespace:
     # Optional skip flags for FEL
     fe_params = opt_fe.add_argument_group('Optional parameters')
     fe_params.add_argument(
-        '-c', '--cutoff', type=float, default=0.8, metavar='Å',
-        help='GROMOS RMSD clustering cutoff in Å (default: 0.8)')
+        '-c', '--cutoff', type=float, default=1.0, metavar='Å',
+        help='GROMOS RMSD clustering cutoff in Å (default: 1.0)')
     fe_params.add_argument(
         '-d', '--deexcite', type=int, default=200, metavar='PS',
         help='Total de-excitation MD length per centroid in ps, split over 4 '
@@ -148,12 +135,12 @@ def parse_arguments() -> argparse.Namespace:
         help='Comma-separated mode indices for FEL projection '
              '(default: same as run, e.g. 7,8,9)')
     fe_params.add_argument(
-        '--modes_2d', type=str, default=None, metavar='PAIRS',
-        help='Mode pairs for 2D FEL plots as space-separated "m1,m2" tokens, '
-             'e.g. "7,8 7,9 8,9". Default: all pairwise combinations of --modes.')
+        '--modes-2d', type=str, default=None, metavar='PAIRS',
+        help='Mode pairs for 2D FEL plots as space-separated "m1,m2" tokens '
+             '(default: all pairwise combinations of --modes, e.g. "7,8 7,9 8,9")')
     fe_params.add_argument(
-        '-b', '--bins', type=int, default=50, metavar='N',
-        help='Number of histogram bins for FEL (default: 50)')
+        '-b', '--bins', type=int, default=100, metavar='N',
+        help='Number of histogram bins for FEL (default: 100)')
     fe_params.add_argument(
         '-T', '--temp', type=float, default=303.15, metavar='K',
         help='Temperature for kBT scaling (default: 303.15 K)')
@@ -163,11 +150,8 @@ def parse_arguments() -> argparse.Namespace:
         help='Atom selection for GROMOS RMSD clustering '
              '(default: "protein and name CA")')
     fe_params.add_argument(
-        '--max_centroids', type=int, default=50, metavar='N',
-        help='Maximum number of centroids submitted to MD. When the cluster '
-             'count exceeds this value, exactly N centroids are selected by '
-             'greedy farthest-point (MaxMin) sampling to maximise '
-             'conformational diversity (default: 50)')
+        '--max-centroids', type=int, default=50, metavar='N',
+        help='Maximum number of centroids submitted to MD (default: 50)')
 
     # Exporting flags for FEL
     fe_export = opt_fe.add_argument_group(
@@ -175,22 +159,58 @@ def parse_arguments() -> argparse.Namespace:
     fe_export.add_argument(
         '--export-cluster', type=int, default=None, metavar='FRAME',
         help='Export the member frame list for one cluster, identified by '
-             'its centroid_frame value from clustering_summary.csv, instead '
-             'of running the FEL protocol. Requires a completed fel '
-             'run. Writes fel/exports/cluster_frame{FRAME}/members.csv.')
+             'its centroid_frame value from clustering_summary.csv. '
+             'Requires a completed fel run. Writes '
+             'fel/exports/cluster_frame{FRAME}/members.csv.')
     fe_export.add_argument(
         '--dump-pdb', action='store_true',
         help='With --export-cluster, also write one PDB file per member '
              'frame to fel/exports/cluster_frame{FRAME}/pdbs/.')
 
-    # ENM subparser
+
+    ######################
+    # ANALYSIS subparser #
+    ######################
+
+    opt_analyze = subparsers.add_parser('analyze', help="Analyze simulation results and generate plots")
+    opt_analyze.add_argument('-src', '--source', action="store", type=str.lower,
+                            default="pyadmd", choices=["pyadmd", "fel"],
+                            help="Trajectory source to analyze: 'pyadmd' for rep{N}.dcd "
+                                 "replica trajectories (default), or 'fel' for "
+                                 "centroid production trajectories from a completed "
+                                 "'fel' run")
+    opt_analyze.add_argument('-r', '--rough', action='store_true',
+                            help='Perform rough analysis (every 5ps instead of every frame)')
+
+    # Optional skip flags for analysis
+    analyze_skip = opt_analyze.add_argument_group('Skip flags (disable individual analyses)')
+    analyze_skip.add_argument('--no-rmsd', action='store_true',
+                              help='Skip RMSD calculation')
+    analyze_skip.add_argument('--no-rg', action='store_true',
+                              help='Skip radius of gyration calculation')
+    analyze_skip.add_argument('--no-sasa', action='store_true',
+                              help='Skip SASA and hydrophobic exposure calculation')
+    analyze_skip.add_argument('--no-rmsf', action='store_true',
+                              help='Skip RMSF calculation')
+    analyze_skip.add_argument('--no-dssp', action='store_true',
+                              help='Skip secondary structure (DSSP) calculation')
+    analyze_skip.add_argument('--no-dccm', action='store_true',
+                              help='Skip DCCM (dynamic cross-correlation matrix) calculation')
+    analyze_skip.add_argument('--no-lmi', action='store_true',
+                              help='Skip LMI (Linear Mutual Information) calculation')
+
+
+    #################
+    # ENM subparser #
+    #################
+
     opt_enm = subparsers.add_parser(
         'enm',
         help="Compute an Elastic Network Model / normal mode analysis"
     )
 
     enm_required = opt_enm.add_argument_group(
-        'Required (unless -w/--write_modes is used)')
+        'Required (unless -w/--write-modes is used)')
     enm_required.add_argument(
         '-i', '--input', action="store", type=str, default=None,
         help='Input PDB file')
@@ -212,45 +232,47 @@ def parse_arguments() -> argparse.Namespace:
         help='Interaction cutoff distance in Å '
              '(default: 15.0 for CA, 12.0 for HEAVY)')
     enm_optional.add_argument(
-        '-k', '--spring_constant', type=float, default=1.0, metavar='K',
+        '-k', '--spring-constant', type=float, default=1.0, metavar='K',
         help='ENM harmonic spring constant in kcal/mol/Å² (default: 1.0)')
     enm_optional.add_argument(
-        '--max_modes', type=int, default=None, metavar='N',
+        '--max-modes', type=int, default=None, metavar='N',
         help='Number of non-rigid-body vibrational modes to compute '
              '(default: 50)')
     enm_optional.add_argument(
-        '--output_modes', type=int, default=10, metavar='N',
+        '--output-modes', type=int, default=10, metavar='N',
         help='Number of modes to write vectors/trajectories/collectivity/'
              'contributions for (default: 10)')
     enm_optional.add_argument(
-        '-w', '--write_modes', metavar='MODES', default=None,
-        help='Write mode vectors/trajectories from a previous ENM run '
-             'without recomputing it. Accepts comma-separated integers and '
-             'inclusive ranges (start:end), e.g. "26,41" "7:10" "42,44:50". '
-             'Requires -o/--output pointing to an existing output '
-             'directory. Use --no_nm_trj to skip trajectory writing and '
-             'output only vectors.')
+        '-w', '--write-modes', metavar='MODES', default=None,
+        help='Write mode vectors/trajectories from a previous ENM run. '
+             'Accepts comma-separated integers and inclusive ranges '
+             '(start:end), e.g. "26,41" "7:10" "42,44:50". Requires '
+             '-o/--output pointing to an existing output directory. ')
 
     # Optional skip flags for ENM
     enm_flags = opt_enm.add_argument_group('Skip flags (disable individual outputs)')
-    enm_flags.add_argument('--no_nm_vec', action='store_true',
+    enm_flags.add_argument('--no-vec', action='store_true',
                           help='Skip writing mode vectors')
-    enm_flags.add_argument('--no_nm_trj', action='store_true',
+    enm_flags.add_argument('--no-trj', action='store_true',
                           help='Skip writing mode trajectories')
-    enm_flags.add_argument('--no_collectivity', action='store_true',
+    enm_flags.add_argument('--no-collectivity', action='store_true',
                           help='Skip collectivity calculation')
-    enm_flags.add_argument('--no_contributions', action='store_true',
+    enm_flags.add_argument('--no-contributions', action='store_true',
                           help='Skip mode contributions plot')
-    enm_flags.add_argument('--no_rmsf', action='store_true',
+    enm_flags.add_argument('--no-rmsf', action='store_true',
                           help='Skip NMA-predicted RMSF plot')
-    enm_flags.add_argument('--no_dccm', action='store_true',
+    enm_flags.add_argument('--no-dccm', action='store_true',
                           help='Skip NMA-predicted DCCM plot')
-    enm_flags.add_argument('--no_gpu', action='store_true',
+    enm_flags.add_argument('--no-gpu', action='store_true',
                           help='Disable GPU acceleration (DCCM only; '
                                'diagonalization GPU use is controlled '
                                'separately)')
 
-    # CLEAN subparser
+
+    ###################
+    # CLEAN subparser #
+    ###################
+
     subparsers.add_parser('clean', help="Erase all previous simulation files")
 
     # Parse arguments
@@ -306,7 +328,7 @@ def parse_arguments() -> argparse.Namespace:
         if args.write_modes is None and args.input is None:
             opt_enm.error(
                 "argument -i/--input is required for normal ENM computation "
-                "(omit -i only when using -w/--write_modes)"
+                "(omit -i only when using -w/--write-modes)"
             )
 
     return args

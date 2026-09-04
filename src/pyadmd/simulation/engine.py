@@ -32,7 +32,8 @@ class OpenMMSimulationEngine:
                  device_index: int = 0, rep_num: int = 1,
                  is_restart: bool = False, full_ener: bool = False,
                  n_steps: int = 100, attach_main_dcd: bool = True,
-                 file_prefix: str = 'rep') -> None:
+                 file_prefix: str = 'rep', friction_per_ps: float = 1.0,
+                 timestep_fs: float = 2.0) -> None:
         """
         Initialize the simulation engine for a single replica.
 
@@ -64,6 +65,19 @@ class OpenMMSimulationEngine:
                 pyAdMD replica naming, e.g. rep1.log). FreeEnergyCalculator's
                 centroid engines pass 'centroid_' so log files read
                 centroid_{frame_idx}.log instead of rep{frame_idx}.log.
+            friction_per_ps (float): LangevinMiddleIntegrator friction
+                coefficient, in inverse picoseconds. Defaults to 1.0,
+                matching the value previously hardcoded here -- passing a
+                different value has no effect on any existing caller that
+                omits this argument. Used by
+                FreeEnergyCalculator._run_centroid_md's reinforced
+                last-resort pass to more aggressively damp localized
+                kinetic energy buildup in stubborn centroids.
+            timestep_fs (float): Integration timestep, in femtoseconds.
+                Defaults to 2.0, matching the value previously hardcoded
+                here. Used by the same reinforced pass to give the
+                integrator finer resolution to correct a fast-developing
+                local event before it compounds.
         """
         self.console = console
         self.n_atoms = system.getNumParticles()
@@ -77,8 +91,8 @@ class OpenMMSimulationEngine:
         # Fresh integrator per replica (independent Langevin RNG state)
         integrator = mm.LangevinMiddleIntegrator(
             temperature * unit.kelvin,
-            1.0 / unit.picosecond,      # friction
-            2.0 * unit.femtoseconds,    # timestep
+            friction_per_ps / unit.picosecond,
+            timestep_fs * unit.femtoseconds,
         )
 
         self.simulation = app.Simulation(

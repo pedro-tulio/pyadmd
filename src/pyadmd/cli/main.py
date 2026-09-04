@@ -71,7 +71,7 @@ def main() -> None:
     elif args.option == 'enm':
         cmd_enm(args, console, enm_calculator)
     elif args.option == 'clean':
-        cmd_clean(console, cwd, input_dir)
+        cmd_clean(console, cwd)
 
 
 if __name__ == "__main__":

@@ -356,7 +356,7 @@ $$
 
 where $`\mathbf{M}_{\mathrm{nm}}^+`$ denotes the Moore–Penrose pseudoinverse of $`\mathbf{M}_{\mathrm{nm}}`$. These approximate coefficients are written to the `factors.csv` output file for reference but do not influence the simulation; the physical vectors $`\mathbf{q}_i`$ are used directly as excitation directions.
 
-**Reproducibility:** the only stochastic step in this procedure is the initial placement of the $`P`$ points on $`S^{N-1}`$ before the repulsion loop runs (skipped entirely when $`P=2N`$, see above). This is now controlled by a seeded RNG (`-seed`/`--seed`, default `42`), so `pyadmd run` calls with identical arguments produce identical excitation vectors and `factors.csv` — see [Run Parameters](#parameters).
+**Reproducibility:** the only stochastic step in this procedure is the initial placement of the $`P`$ points on $`S^{N-1}`$ before the repulsion loop runs (skipped entirely when $`P=2N`$, see above). This is controlled by a seeded RNG (`-seed`/`--seed`, default `42`), so `pyadmd run` calls with identical arguments produce identical excitation vectors and `factors.csv` — see [Run Parameters](#parameters).
 
 **Note:** ENM recomputation under `--recalc` (see [Excitation Direction Update](#excitation-direction-update)) draws a *new* random combination each time it fires and is intentionally **not** covered by `--seed`, since its purpose is to re-diversify the excitation direction mid-simulation.
 
@@ -474,7 +474,7 @@ below into it.
 - **`-rst`/`--rstfile`**: OpenMM XML restart file (`.rst`), written via `XmlSerializer.serialize(state)` from a state built with `getPositions=True, getVelocities=True`
 
 ### Feature Flags
-- **`-n`/`--no_correc`**: Disable excitation vector direction correction and compute standard MDeNM
+- **`-n`/`--no-correc`**: Disable excitation vector direction correction and compute standard MDeNM
 
 - **`-f`/`--fixed`**: Disable excitation vector correction and keep constant excitation energy injections
 
@@ -489,15 +489,15 @@ below into it.
 ## Free Energy
 All parameters are optional; the `fel` subcommand reads its input trajectories and reference state from files already produced by `run`/`restart`/`append`, so no additional files need to be supplied.
 
-- **`-c`/`--cutoff`**: GROMOS RMSD clustering cutoff, in Å (**optional**. Default: **`0.8`**)
+- **`-c`/`--cutoff`**: GROMOS RMSD clustering cutoff, in Å (**optional**. Default: **`1.0`**)
 - **`-d`/`--deexcite`**: Total restrained de-excitation MD length per centroid, in ps, split evenly over 4 restraint phases (**optional**. Default: **`200`**)
 - **`-p`/`--production`**: Unrestrained production MD length per centroid, in ps (**optional**. Default: **`800`**)
 - **`-nm`/`--modes`**: Comma-separated mode indices to project for the FEL (**optional**. Default: same modes used in `run`, *e.g.* `7,8,9`)
-- **`--modes_2d`**: Mode pairs for 2D FEL plots, as space-separated `"m1,m2"` tokens, *e.g.* `"7,8 7,9 8,9"` (**optional**. Default: all pairwise combinations of `--modes`)
-- **`-b`/`--bins`**: Number of histogram bins used for the FEL (**optional**. Default: **`50`**)
+- **`--modes-2d`**: Mode pairs for 2D FEL plots, as space-separated `"m1,m2"` tokens (**optional**. Default: all pairwise combinations of --modes, *e.g.*  "7,8 7,9 8,9")
+- **`-b`/`--bins`**: Number of histogram bins used for the FEL (**optional**. Default: **`100`**)
 - **`-T`/`--temp`**: Temperature for k<sub>B</sub>T scaling and the production ensemble, in K (**optional**. Default: **`303.15`**)
 - **`-s`/`--sel`**: MDAnalysis selection string used for GROMOS RMSD clustering (**optional**. Default: **`"protein and name CA"`**)
-- **`--max_centroids`**: Maximum number of centroids submitted to MD. When the cluster count exceeds this value, exactly this many centroids are selected by greedy farthest-point (MaxMin) sampling to maximize conformational diversity (**optional**. Default: **`50`**)
+- **`--max-centroids`**: Maximum number of centroids submitted to MD. When the cluster count exceeds this value, exactly this many centroids are selected by greedy farthest-point (MaxMin) sampling to maximize conformational diversity (**optional**. Default: **`50`**)
 
 **Note:** `-s`/`--sel` and `-T`/`--temp` must stay the same across repeated `fel` calls on the same simulation — see [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation). This `-s`/`--sel` selection is independent of `run`'s `-sel`/`--selection`: it controls GROMOS clustering only, while `run`'s selection controls both energy injection and (by default) the scope of most `pyadmd analyze` metrics — see [Analysis Selection Scope](#analysis-selection-scope).
 
@@ -511,19 +511,19 @@ All parameters are optional; the `fel` subcommand reads its input trajectories a
 ### Skip Flags
 Each analysis step can be independently disabled. When skipped, that metric will not appear in any CSV, plot, or HTML summary output.
 
-- **`--no_rmsd`**: Skip RMSD calculation
-- **`--no_rg`**: Skip radius of gyration calculation
-- **`--no_sasa`**: Skip SASA and hydrophobic exposure calculation
-- **`--no_rmsf`**: Skip  RMSF calculation
-- **`--no_dssp`**: Skip secondary structure analysis via DSSP
-- **`--no_dccm`**: Skip DCCM (dynamic cross-correlation matrix) calculation
-- **`--no_lmi`**: Skip LMI (Linear Mutual Information) calculation
+- **`--no-rmsd`**: Skip RMSD calculation
+- **`--no-rg`**: Skip radius of gyration calculation
+- **`--no-sasa`**: Skip SASA and hydrophobic exposure calculation
+- **`--no-rmsf`**: Skip  RMSF calculation
+- **`--no-dssp`**: Skip secondary structure analysis via DSSP
+- **`--no-dccm`**: Skip DCCM (dynamic cross-correlation matrix) calculation
+- **`--no-lmi`**: Skip LMI (Linear Mutual Information) calculation
 
 **Note:** Before analysis, the program checks if `pyadmd` or `fel` calls are properly completed. If any unit (pyAdMD replica or free energy centroid) hasn't finished running, `analyze` prints a warning listing the incomplete units and their cycles completed/target, but proceeds anyway — see [Handling Incomplete Units](#handling-incomplete-units) below.
 
 ## ENM
 ### Parameters
-- **`-i`/`--input`**: Input PDB file (**required**, unless **`-w`/`--write_modes`** is used)
+- **`-i`/`--input`**: Input PDB file (**required**, unless **`-w`/`--write-modes`** is used)
 
 - **`-o`/`--output`**: Output folder name (**optional**. Default: **`output`**)
 
@@ -533,25 +533,25 @@ Each analysis step can be independently disabled. When skipped, that metric will
 
 - **`-c`/`--cutoff`**: Interaction cutoff distance, in Å (**optional**. Default: **`15.0`** for CA, **`12.0`** for HEAVY)
 
-- **`-k`/`--spring_constant`**: ENM harmonic spring constant, in kcal/mol/Å² (**optional**. Default: **`1.0`**)
+- **`-k`/`--spring-constant`**: ENM harmonic spring constant, in kcal/mol/Å² (**optional**. Default: **`1.0`**)
 
-- **`--max_modes`**: Number of non-rigid-body vibrational modes to compute (**optional**. Default: **`50`**)
+- **`--max-modes`**: Number of non-rigid-body vibrational modes to compute (**optional**. Default: **`50`**)
 
-- **`--output_modes`**: Number of modes (file-labeled 1 through N, where label 1 is the first non-rigid mode) to write vectors/trajectories for (**optional**. Default: **`10`**)
+- **`--output-modes`**: Number of modes (file-labeled 1 through N, where label 1 is the first non-rigid mode) to write vectors/trajectories for (**optional**. Default: **`10`**)
 
 ### Skip Flags
 Collectivity, contributions, RMSF, DCCM, and mode vector/trajectory writing can each be independently disabled:
 
-- **`--no_nm_vec`**: Skip writing mode vectors (`.xyz`)
-- **`--no_nm_trj`**: Skip writing mode trajectories (`_traj.pdb`)
-- **`--no_collectivity`**: Skip mode collectivity calculation
-- **`--no_contributions`**: Skip the variance-contributions plot
-- **`--no_rmsf`**: Skip the NMA-predicted RMSF plot (analytical, from the harmonic approximation — not derived from an MD trajectory; see [Analysis](#analysis-1) for the trajectory-based RMSF computed elsewhere in the package)
-- **`--no_dccm`**: Skip the NMA-predicted DCCM plot (same analytical distinction as RMSF above)
-- **`--no_gpu`**: Disable GPU acceleration
+- **`--no-vec`**: Skip writing mode vectors (`.xyz`)
+- **`--no-trj`**: Skip writing mode trajectories (`_traj.pdb`)
+- **`--no-collectivity`**: Skip mode collectivity calculation
+- **`--no-contributions`**: Skip the variance-contributions plot
+- **`--no-rmsf`**: Skip the NMA-predicted RMSF plot (analytical, from the harmonic approximation — not derived from an MD trajectory; see [Analysis](#analysis-1) for the trajectory-based RMSF computed elsewhere in the package)
+- **`--no-dccm`**: Skip the NMA-predicted DCCM plot (same analytical distinction as RMSF above)
+- **`--no-gpu`**: Disable GPU acceleration
 
 ### Post-hoc Mode Re-writer
-- **`-w`/`--write_modes`**: Write mode vectors/trajectories from a previously completed `enm` run's saved `*_modes.npy`/`*_frequencies.npy`/structure PDB, without recomputing the ENM. Accepts comma-separated integers and inclusive ranges (`start:end`), *e.g.* `"26,41"`, `"7:10"`, `"42,44:50"`. Requires **`-o`/`--output`** pointing to an existing `enm` output directory.
+- **`-w`/`--write-modes`**: Write mode vectors/trajectories from a previously completed `enm` run's saved `*_modes.npy`/`*_frequencies.npy`/structure PDB, without recomputing the ENM. Accepts comma-separated integers and inclusive ranges (`start:end`), *e.g.* `"26,41"`, `"7:10"`, `"42,44:50"`. Requires **`-o`/`--output`** pointing to an existing `enm` output directory.
 
 **Note on mode-file resolution:** `pyadmd enm`'s mode vector/trajectory files (`_mode_{N}.xyz`/`_mode_{N}_traj.pdb`) are written at the ENM's **native reduced resolution** (Cα-only or heavy-atom only, matching whatever the modes were computed on).
 
@@ -562,21 +562,21 @@ enm_output/
 ├── {base_name}_{model}_structure.pdb      # reduced‑resolution structure (Cα or heavy atoms)
 ├── {base_name}_{model}_frequencies.npy    # vibrational frequencies (filtered, non‑rigid modes)
 ├── {base_name}_{model}_modes.npy          # eigenvector matrix (filtered, non‑rigid modes)
-├── collectivity.csv                       # per‑mode collectivity (κ) and frequency (cm⁻¹) (omitted with --no_collectivity)
-├── mode_contributions.png                 # per‑mode and cumulative variance contributions (omitted with --no_contributions)
-├── rmsf_plot.png                          # NMA‑predicted residue RMSF (harmonic approximation) (omitted with --no_rmsf)
-├── dccm_plot.png                          # NMA‑predicted residue cross‑correlation matrix (omitted with --no_dccm)
-├── dccm_matrix.npy                        # raw NMA‑DCCM matrix (omitted with --no_dccm)
-├── {base_name}_{model}_mode_{N}.xyz       # displacement vector of mode N (XYZ format) (omitted with --no_nm_vec)
-└── {base_name}_{model}_mode_{N}_traj.pdb  # oscillatory PDB trajectory along mode N (multi‑model) (omitted with --no_nm_trj)
+├── collectivity.csv                       # per‑mode collectivity (κ) and frequency (cm⁻¹) (omitted with --no-collectivity)
+├── mode_contributions.png                 # per‑mode and cumulative variance contributions (omitted with --no-contributions)
+├── rmsf_plot.png                          # NMA‑predicted residue RMSF (harmonic approximation) (omitted with --no-rmsf)
+├── dccm_plot.png                          # NMA‑predicted residue cross‑correlation matrix (omitted with --no-dccm)
+├── dccm_matrix.npy                        # raw NMA‑DCCM matrix (omitted with --no-dccm)
+├── {base_name}_{model}_mode_{N}.xyz       # displacement vector of mode N (XYZ format) (omitted with --no-vec)
+└── {base_name}_{model}_mode_{N}_traj.pdb  # oscillatory PDB trajectory along mode N (multi‑model) (omitted with --no-trj)
 ```
 
 
 **Notes:**  
 - `{base_name}` is the stem of the input PDB file (e.g., `system`).
 - `{model}` is either `ca` (Cα‑only) or `heavy` (heavy atoms).
-- The mode vector and trajectory files are written only for the modes specified by `‑‑output_modes` (default: first 10 non‑rigid modes).
-- The `-w` / `‑‑write_modes` option re‑uses an existing output directory to write **additional** mode files (vectors/trajectories) without recomputing the ENM.
+- The mode vector and trajectory files are written only for the modes specified by `‑‑output-modes` (default: first 10 non‑rigid modes).
+- The `-w` / `‑‑write-modes` option re‑uses an existing output directory to write **additional** mode files (vectors/trajectories) without recomputing the ENM.
 
 ### Output Files Description
 
@@ -586,17 +586,17 @@ enm_output/
    - **`{base_name}_{model}_modes.npy`**: 2D array of shape `(3N, M)`, where column `i` is the mass‑weighted eigenvector for mode `i` (matching the order of `frequencies`). These two NumPy files enable fast post‑hoc re‑writing of vectors/trajectories via `-w`.
 
 2. **Collectivity and Variance Contributions**  
-   - **`collectivity.csv`**: CSV with columns `Mode`, `Frequency (cm⁻¹)`, and `Collectivity`. Omitted with `‑‑no_collectivity`.
-   - **`mode_contributions.png`**: Two‑panel figure showing (left) the proportion of total mean‑square fluctuation contributed by each of the first `‑‑max_modes` non‑rigid modes (proportional to `1/λ_k` under equipartition), and (right) the cumulative fraction. Omitted with `‑‑no_contributions`.
+   - **`collectivity.csv`**: CSV with columns `Mode`, `Frequency (cm⁻¹)`, and `Collectivity`. Omitted with `‑‑no-collectivity`.
+   - **`mode_contributions.png`**: Two‑panel figure showing (left) the proportion of total mean‑square fluctuation contributed by each of the first `‑‑max-modes` non‑rigid modes (proportional to `1/λ_k` under equipartition), and (right) the cumulative fraction. Omitted with `‑‑no-contributions`.
 
 3. **NMA‑Predicted RMSF and DCCM**  
-   - **`rmsf_plot.png`**: Residue‑averaged root‑mean‑square fluctuation (Å) derived from the harmonic approximation. The plot is based on the sum over modes of `(kBT/λ_k) * |u_i^(k)|² / m_i`. Omitted with `‑‑no_rmsf`.
+   - **`rmsf_plot.png`**: Residue‑averaged root‑mean‑square fluctuation (Å) derived from the harmonic approximation. The plot is based on the sum over modes of `(kBT/λ_k) * |u_i^(k)|² / m_i`. Omitted with `‑‑no-rmsf`.
    - **`dccm_plot.png`**: DCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
-   - **`dccm_matrix.npy`**: Raw correlation matrix, saved alongside the plot. Both are omitted with `‑‑no_dccm`.
+   - **`dccm_matrix.npy`**: Raw correlation matrix, saved alongside the plot. Both are omitted with `‑‑no-dccm`.
 
 4. **Mode‑Specific Vector and Trajectory Files**  
-   - **`{base_name}_{model}_mode_{N}.xyz`**: XYZ‑formatted file listing the displacement vector for mode `N`. The header includes the mode frequency in cm⁻¹. Omitted with `‑‑no_nm_vec`.
-   - **`{base_name}_{model}_mode_{N}_traj.pdb`**: Multi‑model PDB showing a smooth oscillation along mode `N`. The trajectory is mass‑weighted and scaled to a peak amplitude (default 4 Å). Omitted with `‑‑no_nm_trj`.
+   - **`{base_name}_{model}_mode_{N}.xyz`**: XYZ‑formatted file listing the displacement vector for mode `N`. The header includes the mode frequency in cm⁻¹. Omitted with `‑‑no-vec`.
+   - **`{base_name}_{model}_mode_{N}_traj.pdb`**: Multi‑model PDB showing a smooth oscillation along mode `N`. The trajectory is mass‑weighted and scaled to a peak amplitude (default 4 Å). Omitted with `‑‑no-trj`.
 
 **Note:** When using the post‑hoc mode re‑writer (`pyadmd enm -w "..." -o enm_output`), only the mode‑specific vector and trajectory files are newly written for the requested modes; all other files (core data, collectivity, plots) are left untouched and must already exist from a previous full ENM run.
 
@@ -608,17 +608,21 @@ The **`fel`** subcommand computes a free energy landscape (FEL) from a completed
 
 ## Method Overview
 1. **Merge trajectories**: all `rep*.dcd` replica trajectories are concatenated into a single pseudo-trajectory.
-2. **GROMOS clustering**: frames are clustered by Cα RMSD (`-s`/`-c`); when the number of clusters exceeds `--max_centroids`, a maximally diverse subset is selected via greedy farthest-point (MaxMin) sampling on the cluster centroids.
-3. **Centroid MD**: each centroid undergoes a 4-phase restrained de-excitation (`-d`, progressively decreasing positional restraints on backbone and sidechain heavy atoms) followed by unrestrained production MD (`-p`).
+2. **GROMOS clustering**: frames are clustered by Cα RMSD (`-s`/`-c`); when the number of clusters exceeds `--max-centroids`, a maximally diverse subset is selected via greedy farthest-point (MaxMin) sampling on the cluster centroids.
+3. **Centroid MD**: each centroid undergoes a 4-phase NVT restrained
+   de-excitation (`-d`, progressively decreasing positional restraints on
+   backbone and sidechain heavy atoms) followed by unrestrained NPT production
+   MD (`-p`). Each de-excitation phase is further split into a
+   30%/20%/30%/20% pattern of nominal restraint / brief relief dip, where the dip targets a gentler restraint level rather than the nominal one, periodically releasing local strain due to the force constraints. If a centroid's de-excitation fails, it is automatically retried using an alternative member frame from the same cluster (up to 4 substitutes), and if all of those also fail, retried once more with a reinforced integrator ($`1 fs`$ timestep, $`5 ps^{-1}`$ friction, applied to de-excitation only) before the centroid is finally marked failed and excluded from the FEL.
 4. **Mode projection**: every production frame is projected onto each individual normal mode vector as a signed mass-weighted RMS displacement.
-5. **FEL computation**: a population histogram (`-b` bins) is converted to $`\Delta G`$ via $`\Delta G = -k_{BT} \cdot ln[P(q)/P_{max}]`$, computed independently per mode (1D) and for user-specified mode pairs (2D, `--modes_2d`).
+5. **FEL computation**: a population histogram (`-b` bins) is converted to $`\Delta G`$ via $`\Delta G = -k_{BT} \cdot ln[P(q)/P_{max}]`$, computed independently per mode (1D) and for user-specified mode pairs (2D, `--modes-2d`).
 
 ## Extending a Previous Free Energy Calculation
-`fel` can be re-invoked on the same simulation with a larger `--max_centroids` and/or longer `-p`/`--production` to extend an earlier calculation, rather than starting over:
+`fel` can be re-invoked on the same simulation with a larger `--max-centroids` and/or longer `-p`/`--production` to extend an earlier calculation, rather than starting over:
 
 - **Free to change**: `-c`/`--cutoff` and `-d`/`--deexcite`. Changing the cutoff only affects the re-thresholding of the cached pairwise-RMSD matrix. Changing the de-excitation length only affects newly-created centroids going forward; existing centroids keep whatever de-excitation they originally had and are simply extended in production.
 - **Must stay the same**: `-s`/`--sel`, `-T`/`--temp`. Mixing clustering selections or temperatures inside one pooled FEL is not physically valid.
-- **Never shrinks existing work**: if `--max_centroids` or `-p`/`--production` is *smaller* than the previous call, the program warns and uses the larger of the two values instead. We suggest start with smaller values and append more data, if necessary.
+- **Never shrinks existing work**: if `--max-centroids` or `-p`/`--production` is *smaller* than the previous call, the program warns and uses the larger of the two values instead. We suggest start with smaller values and append more data, if necessary.
 
 ## Output Structure
 ### Directory Organization
@@ -643,9 +647,9 @@ fel/
 
 ## Output Files Description
 1. **Cache Files** 
-- **`run_metadata.json`**: the clustering selection, temperature, cutoff, de-excitation length, `max_centroids`, and production length used.
+- **`run_metadata.json`**: the clustering selection, temperature, cutoff, de-excitation length, `max-centroids`, and production length used.
 - **`clustering_rmsd_cache.npz`/`.json`**: the pairwise-RMSD matrix over subsampled frames.
-- **`clustering_summary.csv`**: summary containing cluster ID, frame index, cluster size, status this run (fresh/extended/skipped), and cycles/ps completed.
+- **`clustering_summary.csv`**: summary containing cluster ID, frame index, cluster size, status this run (`fresh`/`extended`/`skipped`/`failed`, annotated with `substitute frame {N}` and/or `reinforced` when a centroid needed those fallbacks), `source_frame_used` (the frame whose coordinates actually produced a successful run — equal to `centroid_frame` unless a substitute member was used), `md_attempts` (total attempts across the standard and reinforced passes), and cycles/ps completed. A `status` of `failed` means every attempt (original frame + substitutes, standard + reinforced settings) failed; that centroid is excluded from the FEL rather than blocking the run.
 2. **Plot Files** 
 - **`fel_mode[N].csv`/`fel_mode[N]_plot.png`**: 1D free energy landscape per mode, in Å and kcal/mol.
 - **`fel_2d_mode[N]_mode[M].png`**: 2D free energy landscape for a mode pair.
@@ -723,31 +727,31 @@ When `-src fel` is used, the shared production time axis (applied uniformly acro
 ```
 analysis/{fel/}
 ├── analysis_results.csv                  # Combined analysis data from all units
-├── rmsf.csv                              # Combined RMSF data (omitted with --no_rmsf)
+├── rmsf.csv                              # Combined RMSF data (omitted with --no-rmsf)
 ├── analysis_summary.html                 # HTML summary report
-├── rmsd_plot.png                         # RMSD plot (omitted with --no_rmsd)
-├── radius_gyration_plot.png              # Radius of gyration plot (omitted with --no_rg)
-├── sasa_plot.png                         # SASA plot (omitted with --no_sasa)
-├── hydrophobic_exposure_plot.png         # Hydrophobic exposure plot (omitted with --no_sasa)
-├── rmsf_average.png                      # Average RMSF plot (omitted with --no_rmsf)
-├── secondary_structure_average.png       # Average secondary structure plot (omitted with --no_dssp)
-├── dccm_average.png                      # Average DCCM heatmap (omitted with --no_dccm)
-├── dccm_average.npy                      # Average DCCM matrix, raw (omitted with --no_dccm)
-├── lmi_average.png                       # Average LMI heatmap (omitted with --no_lmi)
-├── lmi_average.npy                       # Average LMI matrix, raw (omitted with --no_lmi)
+├── rmsd_plot.png                         # RMSD plot (omitted with --no-rmsd)
+├── radius_gyration_plot.png              # Radius of gyration plot (omitted with --no-rg)
+├── sasa_plot.png                         # SASA plot (omitted with --no-sasa)
+├── hydrophobic_exposure_plot.png         # Hydrophobic exposure plot (omitted with --no-sasa)
+├── rmsf_average.png                      # Average RMSF plot (omitted with --no-rmsf)
+├── secondary_structure_average.png       # Average secondary structure plot (omitted with --no-dssp)
+├── dccm_average.png                      # Average DCCM heatmap (omitted with --no-dccm)
+├── dccm_average.npy                      # Average DCCM matrix, raw (omitted with --no-dccm)
+├── lmi_average.png                       # Average LMI heatmap (omitted with --no-lmi)
+├── lmi_average.npy                       # Average LMI matrix, raw (omitted with --no-lmi)
 └── {rep[1-N]}/ or {centroid_frame[F]}/   # Unit-specific directories
     ├── analysis_results.csv              # Unit-specific analysis data
-    ├── rmsf.csv                          # Unit-specific RMSF data (omitted with --no_rmsf)
-    ├── rmsd_plot.png                     # Unit-specific RMSD plot (omitted with --no_rmsd)
-    ├── radius_gyration_plot.png          # Unit-specific RoG plot (omitted with --no_rg)
-    ├── sasa_plot.png                     # Unit-specific SASA plot (omitted with --no_sasa)
-    ├── hydrophobic_exposure_plot.png     # Unit-specific hydrophobic exposure plot (omitted with --no_sasa)
-    ├── rmsf_plot.png                     # Unit-specific RMSF plot (omitted with --no_rmsf)
-    ├── secondary_structure.png           # Unit-specific secondary structure plot (omitted with --no_dssp)
-    ├── dccm_matrix.npy                   # Unit-specific DCCM matrix, raw (omitted with --no_dccm)
-    ├── dccm_plot.png                     # Unit-specific DCCM heatmap (omitted with --no_dccm)
-    ├── lmi_matrix.npy                    # Unit-specific LMI matrix, raw (omitted with --no_lmi)
-    └── lmi_plot.png                      # Unit-specific LMI heatmap (omitted with --no_lmi)
+    ├── rmsf.csv                          # Unit-specific RMSF data (omitted with --no-rmsf)
+    ├── rmsd_plot.png                     # Unit-specific RMSD plot (omitted with --no-rmsd)
+    ├── radius_gyration_plot.png          # Unit-specific RoG plot (omitted with --no-rg)
+    ├── sasa_plot.png                     # Unit-specific SASA plot (omitted with --no-sasa)
+    ├── hydrophobic_exposure_plot.png     # Unit-specific hydrophobic exposure plot (omitted with --no-sasa)
+    ├── rmsf_plot.png                     # Unit-specific RMSF plot (omitted with --no-rmsf)
+    ├── secondary_structure.png           # Unit-specific secondary structure plot (omitted with --no-dssp)
+    ├── dccm_matrix.npy                   # Unit-specific DCCM matrix, raw (omitted with --no-dccm)
+    ├── dccm_plot.png                     # Unit-specific DCCM heatmap (omitted with --no-dccm)
+    ├── lmi_matrix.npy                    # Unit-specific LMI matrix, raw (omitted with --no-lmi)
+    └── lmi_plot.png                      # Unit-specific LMI heatmap (omitted with --no-lmi)
 ```
 **Note:** With `-src fel`, the same set of files is written under `analysis/fel/` instead, with one subdirectory per centroid (named by frame index, mirroring `fel/centroids/centroid_frame[F]/`) in place of `rep[1-N]/`.
 
@@ -762,9 +766,9 @@ analysis/{fel/}
 - Average plots across all units
 
 3. **Correlation Matrix Files**
-- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) DCCM matrix, values in [-1, 1]. Omitted with `--no_dccm`.
+- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) DCCM matrix, values in [-1, 1]. Omitted with `--no-dccm`.
 - **`dccm_plot.png`** / **`dccm_average.png`**: DCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
-- **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in [0, 1]. Omitted with `--no_lmi`.
+- **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in [0, 1]. Omitted with `--no-lmi`.
 - **`lmi_plot.png`** / **`lmi_average.png`**: LMI heatmap, sequential colormap (LMI has no sign).
 
 4. **HTML Summary**
@@ -822,7 +826,7 @@ pyadmd run -src NAMD \
                      -vel tutorial/system.vel \
                      -xsc tutorial/system.xsc \
                      -str tutorial/system.str \
-                     --no_correc
+                     --no-correc
 ```
 ## Restart unfinished pyAdMD simulations
 ```
@@ -838,7 +842,7 @@ pyadmd analyze
 ```
 ## Analyze every 5 ps skipping DSSP and LMI
 ```
-pyadmd analyze -r --no_dssp --no_lmi
+pyadmd analyze -r --no-dssp --no-lmi
 ```
 ## Compute a free energy landscape
 ```
@@ -846,7 +850,7 @@ pyadmd fel -c 2 -p 100
 ```
 ## Extend a previous free energy calculation with more centroids and production time
 ```
-pyadmd fel -c 2 -p 500 --max_centroids 100
+pyadmd fel -c 2 -p 500 --max-centroids 100
 ```
 ## Compute a standalone ENM (Cα model, writing modes 7-16)
 ```

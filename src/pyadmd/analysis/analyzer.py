@@ -253,7 +253,7 @@ class Analyzer:
         to have (see ``_unit_output_complete``):
             - ``analysis_results.csv``   -> per-frame data rows
             - ``rmsf.csv``               -> per-residue RMSF rows (if present;
-                                             absent when ``--no_rmsf`` was
+                                             absent when ``--no-rmsf`` was
                                              used for the original run)
             - ``dccm_matrix.npy``        -> DCCM matrix (if present)
             - ``lmi_matrix.npy``         -> LMI matrix (if present)
