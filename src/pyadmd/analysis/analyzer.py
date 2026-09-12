@@ -18,6 +18,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from itertools import combinations
+from scipy.stats import gaussian_kde
+from scipy.interpolate import RegularGridInterpolator
 
 import MDAnalysis as mda
 from MDAnalysis.analysis import align
@@ -27,6 +30,8 @@ from Bio.PDB.PDBExceptions import PDBConstructionWarning
 from pyadmd.console import ConsoleConfig
 from pyadmd.analysis.completion import check_pyadmd_completion
 from pyadmd.fel.completion import check_fel_completion
+from pyadmd.io.state import load_reference_state
+from pyadmd.modes.projection import get_projection_setup, compute_mode_projections_df
 
 # Ignore warnings
 import warnings
@@ -70,7 +75,7 @@ class Analyzer:
     def __init__(self, console: ConsoleConfig, param_file: str = "pyAdMD_params.json", rough: bool = False,
                  no_rmsd: bool = False, no_rg: bool = False, no_sasa: bool = False, no_rmsf: bool = False,
                  no_dssp: bool = False, no_dccm: bool = False, no_lmi: bool = False,
-                 source: str = "pyadmd") -> None:
+                 no_modeproj: bool = False, source: str = "pyadmd") -> None:
         """
         Initializes Analyzer with configuration and parameters.
 
@@ -87,6 +92,8 @@ class Analyzer:
                 matrix) calculation
             no_lmi (bool): If True, skip LMI (Linear Mutual Information)
                 calculation
+            no_modeproj (bool): If True, skip the mode-projection analysis
+                (per-mode MRMS displacement CSV and KDE scatter plots)
             source (str): Trajectory source to analyze: 'pyadmd' (default) for
                 rep{N}.dcd replica trajectories, or 'fel' for centroid
                 production trajectories from a completed 'fel' run.
@@ -101,6 +108,7 @@ class Analyzer:
         self.skip_dssp = no_dssp
         self.skip_dccm = no_dccm
         self.skip_lmi = no_lmi
+        self.skip_modeproj = no_modeproj
         self.source = source
         self.params = self._load_parameters()
 
@@ -496,6 +504,10 @@ class Analyzer:
         if not self.skip_lmi and lmi_sum is not None:
             self._generate_correlation_avg_plot(lmi_sum, lmi_count, kind='lmi')
 
+        # Mode-projection analysis (optional)
+        if not self.skip_modeproj:
+            self._run_mode_projection_analysis()
+
         # Generate HTML summary
         self._generate_html_summary(df, sim_time, incomplete=incomplete)
 
@@ -691,6 +703,10 @@ class Analyzer:
             self._generate_correlation_avg_plot(dccm_sum, dccm_count, kind='dccm')
         if not self.skip_lmi and lmi_sum is not None:
             self._generate_correlation_avg_plot(lmi_sum, lmi_count, kind='lmi')
+
+        # Mode-projection analysis (optional)
+        if not self.skip_modeproj:
+            self._run_mode_projection_analysis()
 
         # Generate HTML summary
         self._generate_html_summary(df, sim_time, incomplete=incomplete)
@@ -1778,6 +1794,11 @@ class Analyzer:
         if not self.skip_lmi:
             notes_items.insert(-1, "<li>LMI (Linear Mutual Information) is signless (range [0, 1]) and "
                                     "reports total coupling strength regardless of correlation direction</li>")
+        if not self.skip_modeproj and getattr(self, '_modeproj_pairs_plotted', None):
+            notes_items.insert(-1, "<li>Mode projections show mass-weighted MRMS displacement along "
+                                    "each individually excited normal mode; see "
+                                    "<code>mode_projections.csv</code> for raw per-frame values, and "
+                                    "the KDE scatter plots below for pairwise density</li>")
         notes_html = "\n                    ".join(notes_items)
 
         # Source note: which trajectories this summary was generated from
@@ -1853,6 +1874,8 @@ class Analyzer:
                     {plot_items}
                 </div>
 
+                {modeproj_html}
+
                 <h2>Notes</h2>
                 <ul>
                     {notes_html}
@@ -1869,6 +1892,7 @@ class Analyzer:
                 replica_tables=self._html_rep_tables(summary_data),
                 avg_table_rows=self._html_summary_avg_table(avg_summary),
                 plot_items=self._html_summary_plots(),
+                modeproj_html=self._html_mode_proj_section(),
                 notes_html=notes_html
             ))
 
@@ -2061,6 +2085,251 @@ class Analyzer:
                 </div>
                 """
         return plot_items
+
+    def _html_mode_proj_section(self) -> str:
+        """
+        Build the "Mode Projections" HTML section (KDE-colored scatter
+        plots for every excited mode pair), or an empty string when the
+        analysis was skipped or produced no plots.
+
+        Returns:
+            str: HTML block, or "" if there is nothing to show.
+        """
+        if self.skip_modeproj or not getattr(self, '_modeproj_pairs_plotted', None):
+            return ""
+
+        plot_items = ""
+        for m1, m2 in self._modeproj_pairs_plotted:
+            fname = f"mode_proj_scatter_mode{m1}_mode{m2}.png"
+            if os.path.exists(f"{self.analysis_dir}/{fname}"):
+                plot_items += f"""
+                <div class="plot-item">
+                    <img src="{fname}" alt="Mode {m1} x {m2} projection density">
+                    <p>Modes {m1} \u00d7 {m2}</p>
+                </div>
+                """
+        if not plot_items:
+            return ""
+
+        return f"""
+                <h2>Mode Projections</h2>
+                <p>Trajectory frames projected onto each individually excited normal
+                mode (mass-weighted MRMS displacement, in \u00c5), colored by KDE
+                density. See <code>mode_projections.csv</code> for the raw
+                per-frame values.</p>
+                <div class="plot-grid">
+                    {plot_items}
+                </div>
+        """
+
+    def _discover_unit_dcd_pairs(self) -> List[Tuple[int, str]]:
+        """
+        Discover per-unit DCD trajectory paths for mode-projection
+        analysis, mirroring the discovery logic already used in
+        ``analyze_all_replicas``/``analyze_all_centroids``.
+
+        Returns:
+            list[tuple[int, str]]: One ``(unit_id, dcd_path)`` pair per
+                unit found on disk, sorted by unit id. Empty if none
+                found.
+        """
+        cwd = self.params.get('cwd', os.getcwd())
+        pairs: List[Tuple[int, str]] = []
+
+        if self.source == 'fel':
+            centroid_pattern = re.compile(r"centroid_frame(\d+)")
+            for dcd_path in glob.glob(f"{cwd}/fel/centroids/centroid_frame*/centroid_*.dcd"):
+                m = centroid_pattern.search(dcd_path)
+                if m:
+                    pairs.append((int(m.group(1)), dcd_path))
+        else:
+            args = self.params.get('args', {})
+            replicas = args.get('replicas', 10)
+            for rep in range(1, replicas + 1):
+                dcd_path = f"{cwd}/rep{rep}/rep{rep}.dcd"
+                if os.path.exists(dcd_path):
+                    pairs.append((rep, dcd_path))
+
+        pairs.sort(key=lambda p: p[0])
+        return pairs
+
+    def _run_mode_projection_analysis(self) -> None:
+        """
+        Project every analyzed trajectory onto the individual normal modes
+        excited during ``run`` (``pyAdMD_params.json``'s ``nm_parsed``),
+        writing a combined ``mode_projections.csv`` (columns
+        ``[unit_col, 'time', 'mode_{n1}', 'mode_{n2}', ...]``) and one
+        KDE-colored 2D scatter plot per pairwise combination of those
+        modes, pooling frames from every analyzed unit.
+
+        For ``-src fel``, first checks whether ``fel/mode_projections.csv``
+        (written by ``FreeEnergyCalculator.generate_outputs``) already
+        covers every requested mode; if so, reuses it directly instead of
+        recomputing. Populates ``self._modeproj_pairs_plotted`` for
+        ``_html_mode_proj_section`` to render; leaves it as an empty list
+        on any early return (skipped analysis, missing inputs, no data).
+        """
+        self._modeproj_pairs_plotted: List[Tuple[int, int]] = []
+
+        if self.params is None:
+            return
+
+        run_args = self.params.get('args', {})
+        modes = self.params.get('nm_parsed')
+        if not modes:
+            print(f"{self.console.PGM_WRN}No 'nm_parsed' found in "
+                  f"{self.console.WRN}{self.param_file}{self.console.STD}; "
+                  "skipping mode-projection analysis.")
+            return
+
+        cwd = self.params.get('cwd', os.getcwd())
+        input_dir = f"{cwd}/inputs"
+        psffile = f"{input_dir}/{run_args.get('psffile', '').split('/')[-1]}"
+        input_engine = run_args.get('source', 'NAMD').upper()
+        nm_type = run_args.get('model', 'CA').lower()
+        coorfile = (f"{input_dir}/{run_args.get('coorfile', '').split('/')[-1]}"
+                   if input_engine == 'NAMD' and run_args.get('coorfile') else None)
+        rstfile = (f"{input_dir}/{run_args.get('rstfile', '').split('/')[-1]}"
+                  if input_engine != 'NAMD' and run_args.get('rstfile') else None)
+
+        try:
+            ref_positions_ang, _, _ = load_reference_state(input_dir)
+        except FileNotFoundError as exc:
+            print(f"{self.console.PGM_WRN}Could not load reference state for "
+                  f"mode-projection analysis ({self.console.WRN}{exc}{self.console.STD}); skipping.")
+            return
+
+        n_steps = run_args.get('n_steps', 100)
+        cycle_ps = n_steps * _PS_PER_STEP
+
+        projections_df = None
+
+        # -src fel: try to reuse FEL's own mode_projections.csv, if it
+        # already covers every requested mode.
+        if self.source == 'fel':
+            fel_csv = f"{cwd}/fel/mode_projections.csv"
+            needed_cols = {f'mode_{m}' for m in modes}
+            if os.path.exists(fel_csv):
+                try:
+                    cached_df = pd.read_csv(fel_csv)
+                    if needed_cols.issubset(set(cached_df.columns)):
+                        keep_cols = ['centroid_frame', 'time'] + sorted(
+                            needed_cols, key=lambda c: int(c.split('_')[1]))
+                        projections_df = cached_df[keep_cols].rename(
+                            columns={'centroid_frame': self.unit_col})
+                        print(f"{self.console.PGM_NAM}Reusing FEL-computed mode "
+                              f"projections from {self.console.EXT}{fel_csv}{self.console.STD} "
+                              "(covers all requested modes; skipping recomputation).")
+                    else:
+                        missing = needed_cols - set(cached_df.columns)
+                        print(f"{self.console.PGM_WRN}{self.console.WRN}{fel_csv}{self.console.STD} "
+                              f"exists but is missing {self.console.WRN}{sorted(missing)}"
+                              f"{self.console.STD}; recomputing.")
+                except Exception as exc:
+                    print(f"{self.console.PGM_WRN}Could not read {self.console.WRN}{fel_csv}"
+                          f"{self.console.STD} ({self.console.WRN}{exc}{self.console.STD}); recomputing.")
+
+        if projections_df is None:
+            try:
+                ca_ix_full, ca_masses, M_ca, ref_pos_ca_ang, mode_vectors_ca = get_projection_setup(
+                    psffile=psffile, input_dir=input_dir, ref_positions_ang=ref_positions_ang,
+                    coorfile=coorfile, rstfile=rstfile, input_engine=input_engine,
+                    nm_type=nm_type, modes=modes, console=self.console,
+                )
+            except RuntimeError as exc:
+                print(f"{self.console.PGM_WRN}Cannot set up mode-projection "
+                      f"analysis ({self.console.WRN}{exc}{self.console.STD}); skipping.")
+                return
+
+            unit_dcd_pairs = self._discover_unit_dcd_pairs()
+            if not unit_dcd_pairs:
+                print(f"{self.console.PGM_WRN}No trajectories found for mode-projection analysis.")
+                return
+
+            print(f"{self.console.PGM_NAM}Computing mode projections on "
+                  f"{self.console.EXT}{len(unit_dcd_pairs)}{self.console.STD} trajectories "
+                  f"for modes {self.console.EXT}{modes}{self.console.STD}...")
+            projections_df = compute_mode_projections_df(
+                psffile=psffile, unit_dcd_pairs=unit_dcd_pairs, unit_col=self.unit_col,
+                cycle_ps=cycle_ps, ca_ix_full=ca_ix_full, ca_masses=ca_masses, M_ca=M_ca,
+                ref_pos_ca_ang=ref_pos_ca_ang, mode_vectors_ca=mode_vectors_ca,
+            )
+
+        if projections_df.empty:
+            print(f"{self.console.PGM_WRN}No mode-projection data generated.")
+            return
+
+        out_csv = f"{self.analysis_dir}/mode_projections.csv"
+        projections_df.to_csv(out_csv, index=False)
+        print(f"{self.console.PGM_NAM}Mode projections saved to "
+              f"{self.console.EXT}{out_csv}{self.console.STD}.")
+
+        for m1, m2 in combinations(sorted(modes), 2):
+            col1, col2 = f'mode_{m1}', f'mode_{m2}'
+            if col1 not in projections_df.columns or col2 not in projections_df.columns:
+                continue
+            x = projections_df[col1].values
+            y = projections_df[col2].values
+            if self._plot_mode_proj_kde(x, y, m1, m2):
+                self._modeproj_pairs_plotted.append((m1, m2))
+
+    def _plot_mode_proj_kde(self, x: np.ndarray, y: np.ndarray, m1: int, m2: int) -> bool:
+        """
+        Build and save a 2D scatter plot of mode-{m1} vs mode-{m2}
+        projections, colored by KDE density.
+
+        Density is evaluated on a coarse grid and interpolated back onto
+        each scatter point to save time (rather than evaluating the KDE
+        pointwise at every frame).
+
+        Args:
+            x (numpy.ndarray): Mode-{m1} projections (Å), one value per
+                pooled frame.
+            y (numpy.ndarray): Mode-{m2} projections (Å), one value per
+                pooled frame (same length/order as ``x``).
+            m1 (int): First mode number (x-axis).
+            m2 (int): Second mode number (y-axis).
+
+        Returns:
+            bool: True if the plot was written, False if skipped (e.g.
+                too few points or a degenerate KDE fit).
+        """
+        if len(x) < 3:
+            print(f"{self.console.PGM_WRN}Not enough frames to plot mode "
+                  f"{self.console.WRN}{m1}{self.console.STD}\u00d7{self.console.WRN}{m2}"
+                  f"{self.console.STD} density; skipping.")
+            return False
+        try:
+            xy = np.vstack([x, y])
+            kde = gaussian_kde(xy)
+
+            grid_n = 100
+            x_grid = np.linspace(x.min(), x.max(), grid_n)
+            y_grid = np.linspace(y.min(), y.max(), grid_n)
+            Xg, Yg = np.meshgrid(x_grid, y_grid)
+            grid_density = kde(np.vstack([Xg.ravel(), Yg.ravel()])).reshape(Xg.shape)
+
+            interp = RegularGridInterpolator((y_grid, x_grid), grid_density,
+                                             bounds_error=False, fill_value=None)
+            point_density = interp(np.column_stack([y, x]))
+
+            plt.figure(figsize=(7, 6))
+            sc = plt.scatter(x, y, c=point_density, cmap='inferno', s=8, alpha=0.7)
+            cbar = plt.colorbar(sc)
+            cbar.set_label('Density (KDE)', fontsize=11)
+            plt.xlabel(f'Mode {m1} MRMS (\u00c5)', fontsize=12)
+            plt.ylabel(f'Mode {m2} MRMS (\u00c5)', fontsize=12)
+            plt.title(f'Mode Projection Density \u2014 Modes {m1} \u00d7 {m2}', fontsize=13)
+            plt.tight_layout()
+            out_path = f"{self.analysis_dir}/mode_proj_scatter_mode{m1}_mode{m2}.png"
+            plt.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            return True
+        except Exception as e:
+            print(f"{self.console.PGM_WRN}Could not create mode-projection "
+                  f"scatter plot for modes {self.console.WRN}{m1}{self.console.STD}\u00d7"
+                  f"{self.console.WRN}{m2}{self.console.STD}: {self.console.WRN}{e}{self.console.STD}")
+            return False
 
     def _generate_replica_plots(self, data: List[Dict[str, Any]], rmsf_data: List[Dict[str, Any]],
                                 sim_time: int, rep_analysis_dir: str, rep_num: int) -> None:

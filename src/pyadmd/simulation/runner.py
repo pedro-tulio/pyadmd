@@ -328,7 +328,13 @@ class SimulationRunner:
 
             # Convert AKMA to nm/ps and ADD to initial velocities
             exc_vel_nm_ps = exc_vel_sel * AKMA_VEL_TO_NM_PS
-            self._init_state.velocities_nm_ps[sel_ix] += exc_vel_nm_ps
+            replica_velocities_nm_ps = self._init_state.velocities_nm_ps.copy()
+            replica_velocities_nm_ps[sel_ix] += exc_vel_nm_ps
+            replica_init_state = SystemState(
+                positions_nm=self._init_state.positions_nm,
+                velocities_nm_ps=replica_velocities_nm_ps,
+                box_vectors_nm=self._init_state.box_vectors_nm,
+            )
 
             # Store full-system excitation vector (AKMA) for potential rescaling
             self._cntrl_vec    = np.zeros((self.n_atoms, 3))
@@ -364,7 +370,7 @@ class SimulationRunner:
                 full_ener=getattr(self.args, 'full_ener', False),
                 n_steps=getattr(self.args, 'n_steps', 50),
             )
-            engine.initialize_state(self._init_state)
+            engine.initialize_state(replica_init_state)
 
         ## == RESTART / APPEND == ##
         else:

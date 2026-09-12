@@ -518,6 +518,7 @@ def cmd_analyze(args: Any, console: ConsoleConfig) -> None:
         no_dssp=args.no_dssp,
         no_dccm=args.no_dccm,
         no_lmi=args.no_lmi,
+        no_modeproj=args.no_modeproj,
         source=args.source,
     )
     if args.source == 'fel':

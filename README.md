@@ -76,13 +76,13 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation)
   - [Output Structure](#output-structure-1)
     - [Directory Organization](#directory-organization-1)
-  - [Output Files Description](#output-files-description-1)
+    - [Output Files Description](#output-files-description-1)
 - [Analysis](#analysis-1)
   - [Basic Structural Properties Calculated](#basic-structural-properties-calculated)
-  - [Analysis Modes](#analysis-modes)
-    - [Standard Analysis](#standard-analysis)
-    - [Rough Analysis](#rough-analysis)
-    - [Selective Analysis (Skip Flags)](#selective-analysis-skip-flags)
+    - [Analysis Modes](#analysis-modes)
+      - [Standard Analysis](#standard-analysis)
+      - [Rough Analysis](#rough-analysis)
+      - [Selective Analysis (Skip Flags)](#selective-analysis-skip-flags)
   - [Trajectory Source](#trajectory-source)
   - [Handling Incomplete Units](#handling-incomplete-units)
   - [Configuration Parameters](#configuration-parameters)
@@ -451,7 +451,7 @@ Create an atom selection to apply the energy injection using *[MDAnalysis select
 
 - **`-rep`/`--replicas`**: Number of replicas to run (**optional**. Default: **`10`**)
 
-- **`-seed`/`--seed`**: Random seed for the uniform mode-combination generation (the repulsion-algorithm initialization described in [Uniform Normal Modes Combination](#uniform-normal-modes-combination)) (**optional**. Default: **`42`**). Fixing this makes `run` reproducible: identical CLI arguments always produce identical excitation vectors and `factors.csv`. Pass a different value to obtain an independent replicate ensemble. Does **not** affect the `--recalc` mid-simulation re-excitation, which remains stochastic by design — see [Excitation Direction Update](#excitation-direction-update).
+- **`-seed`/`--seed`**: Random seed for the uniform mode-combination generation (the repulsion-algorithm initialization described in [Uniform Normal Modes Combination](#uniform-normal-modes-combination)) (**optional**. Default: **`42`**). Fixing this value makes `run` more reproducible: identical CLI arguments always produce identical excitation vectors and `factors.csv`. Pass a different value to obtain an independent replicate ensemble. Does **not** affect the `--recalc` mid-simulation re-excitation, which remains stochastic by design — see [Excitation Direction Update](#excitation-direction-update). **Note:** fixing the random seed will create the same start conditions to `run`, but the simulation will diverge after a given point due to stochasticity and floating point precision.
 
 ### Files
 `pyadmd run` automatically creates the `inputs/` directory in the current
@@ -480,7 +480,7 @@ below into it.
 
 - **`-r`/`--recalc`**: Recompute ENM modes instead of correcting the excitation vector direction. **Note:** the new mode combination generated after each recomputation is drawn from a fresh random unit vector and is not controlled by `-seed`/`--seed` — see [Excitation Direction Update](#excitation-direction-update).
 
-- **`--full_ener`**: Write per-term energy decomposition (BOND, ANGLE, DIHED, IMPRP, CMAP, UBREY, NBFIX, NONBONDED, etc.) to `rep{N}_ener_decomp.log` every cycle
+- **`--full-ener`**: Write per-term energy decomposition (BOND, ANGLE, DIHED, IMPRP, CMAP, UBREY, NBFIX, NONBONDED, etc.) to `rep{N}_ener_decomp.log` every cycle
 
 ## Append
 ### Parameters
@@ -518,6 +518,7 @@ Each analysis step can be independently disabled. When skipped, that metric will
 - **`--no-dssp`**: Skip secondary structure analysis via DSSP
 - **`--no-dccm`**: Skip DCCM (dynamic cross-correlation matrix) calculation
 - **`--no-lmi`**: Skip LMI (Linear Mutual Information) calculation
+- **`--no-modeproj`**: Skip mode-projection analysis
 
 **Note:** Before analysis, the program checks if `pyadmd` or `fel` calls are properly completed. If any unit (pyAdMD replica or free energy centroid) hasn't finished running, `analyze` prints a warning listing the incomplete units and their cycles completed/target, but proceeds anyway — see [Handling Incomplete Units](#handling-incomplete-units) below.
 
@@ -632,7 +633,7 @@ fel/
 ├── clustering_rmsd_cache.npz               # cached pairwise-RMSD matrix (reused across calls)
 ├── clustering_rmsd_cache.json              # cache validity metadata (selection, frame count, stride)
 ├── clustering_summary.csv                  # per-cluster frame index, size, and production status
-├── projections_mode[N].npy                 # raw mode projections (Å)
+├── mode_projections.csv                    # combined per-frame mode projections (centroid_frame, time, mode_N...)
 ├── fel_mode[N].csv                         # 1D FEL data (coordinate, ΔG)
 ├── fel_mode[N]_plot.png                    # 1D FEL plot
 ├── fel_2d_mode[N]_mode[M].png              # 2D FEL plot for a mode pair
@@ -645,16 +646,19 @@ fel/
         └── checkpoint.chk                  # periodic (every 10 cycles) checkpoint
 ```
 
-## Output Files Description
+### Output Files Description
 1. **Cache Files** 
-- **`run_metadata.json`**: the clustering selection, temperature, cutoff, de-excitation length, `max-centroids`, and production length used.
-- **`clustering_rmsd_cache.npz`/`.json`**: the pairwise-RMSD matrix over subsampled frames.
-- **`clustering_summary.csv`**: summary containing cluster ID, frame index, cluster size, status this run (`fresh`/`extended`/`skipped`/`failed`, annotated with `substitute frame {N}` and/or `reinforced` when a centroid needed those fallbacks), `source_frame_used` (the frame whose coordinates actually produced a successful run — equal to `centroid_frame` unless a substitute member was used), `md_attempts` (total attempts across the standard and reinforced passes), and cycles/ps completed. A `status` of `failed` means every attempt (original frame + substitutes, standard + reinforced settings) failed; that centroid is excluded from the FEL rather than blocking the run.
+   - **`run_metadata.json`**: the clustering selection, temperature, cutoff, de-excitation length, `max-centroids`, and production length used.
+   - **`clustering_rmsd_cache.npz`/`.json`**: the pairwise-RMSD matrix over subsampled frames.
+   - **`clustering_summary.csv`**: summary containing cluster ID, frame index, cluster size, status this run (`fresh`/`extended`/`skipped`/`failed`, annotated with `substitute frame {N}` and/or `reinforced` when a centroid needed those fallbacks), `source_frame_used` (the frame whose coordinates actually produced a successful run — equal to `centroid_frame` unless a substitute member was used), `md_attempts` (total attempts across the standard and reinforced passes), and cycles/ps completed. A `status` of `failed` means every attempt (original frame + substitutes, standard + reinforced settings) failed; that centroid is excluded from the FEL rather than blocking the run.
+   - **`mode_projections.csv`**: every production frame's signed mass-weighted MRMS displacement (Å) along each mode in `--modes`, one row per `(centroid_frame, time)` pair, columns `centroid_frame, time, mode_{N}, ...`. Reused directly by `pyadmd analyze -src fel`'s mode-projection analysis (see [Analysis](#analysis-1)) whenever it already covers every mode that call needs, skipping recomputation entirely.
+  
 2. **Plot Files** 
-- **`fel_mode[N].csv`/`fel_mode[N]_plot.png`**: 1D free energy landscape per mode, in Å and kcal/mol.
-- **`fel_2d_mode[N]_mode[M].png`**: 2D free energy landscape for a mode pair.
+   - **`fel_mode[N].csv`/`fel_mode[N]_plot.png`**: 1D free energy landscape per mode, in Å and kcal/mol.
+   - **`fel_2d_mode[N]_mode[M].png`**: 2D free energy landscape for a mode pair.
+
 3. **HTML Summary**
--  **`fel_summary.html`**: interactive summary with protocol parameters, per-mode FEL statistics, per-centroid production status, and embedded plots.
+   -  **`fel_summary.html`**: interactive summary with protocol parameters, per-mode FEL statistics, per-centroid production status, and embedded plots.
 
 [Back to top ↩](#)
 * ****
@@ -676,22 +680,24 @@ The PyAdMD **`analysis`** module provides comprehensive analysis capabilities fo
 
 6. **Secondary Structure Content:** Calculates secondary structure elements using DSSP. Tracks helix, sheet, coil, turn, and other structural elements over time and reports the number of residues in each secondary structure type.
 
-7. **Dynamic Cross-Correlation Matrix (DCCM):** Measures pairwise linear correlation of Cα residue motions after Kabsch superposition to remove rigid-body rotation/translation. Values range from +1 (fully correlated motion) through 0 (uncorrelated) to −1 (fully anti-correlated motion), useful for identifying coupled domains, allosteric communication paths, and correlated/anti-correlated collective motions.
+7. **Dynamic Cross-Correlation Matrix (DCCM):** Measures pairwise linear correlation of Cα residue motions after Kabsch superposition to remove rigid-body rotation/translation. Values range from $`+1`$ (fully correlated motion) through $`0`$ (uncorrelated) to $`−1`$ (fully anti-correlated motion), useful for identifying coupled domains, allosteric communication paths, and correlated/anti-correlated collective motions.
 
-8. **Linear Mutual Information (LMI):** An alternative, signless measure of residue-residue coupling strength (range [0, 1]) computed via the Gaussian approximation of generalized correlation. Unlike DCCM, LMI reports strongly anti-correlated motion with the same high value as strongly correlated motion, since it measures total coupling rather than its direction.
+8. **Linear Mutual Information (LMI):** An alternative, signless measure of residue-residue coupling strength (range $`[0, 1]`$) computed via the Gaussian approximation of generalized correlation. Unlike DCCM, LMI reports strongly anti-correlated motion with the same high value as strongly correlated motion, since it measures total coupling rather than its direction.
 
-## Analysis Modes
-### Standard Analysis
+9. **Mode Projections:** Every analyzed frame's signed mass-weighted MRMS displacement (Å) along each individually excited normal mode. Pairs of excited modes are additionally visualized as 2D scatter plots colored by KDE density, useful for seeing which combinations of mode directions the trajectory actually populates.
+
+### Analysis Modes
+#### Standard Analysis
 - Analyzes every frame of the trajectory
 - Provides the highest resolution data
 - May be computationally intensive
 
-### Rough Analysis
-- Analyzes frames at *5ps* intervals
+#### Rough Analysis
+- Analyzes frames at $`5ps`$ intervals
 - Significantly reduces computation time
 - Suitable for quick overviews or large systems
 
-### Selective Analysis (Skip Flags)
+#### Selective Analysis (Skip Flags)
 Individual analyses can be disabled at the command line. This is useful when:
 - DSSP is not installed (avoid exception error)
 - Only a subset of metrics is needed (*e.g.* RMSD + RMSF only)
@@ -728,6 +734,8 @@ When `-src fel` is used, the shared production time axis (applied uniformly acro
 analysis/{fel/}
 ├── analysis_results.csv                  # Combined analysis data from all units
 ├── rmsf.csv                              # Combined RMSF data (omitted with --no-rmsf)
+├── mode_projections.csv                  # Combined mode-projection data from all units (omitted with --no-modeproj)
+├── mode_proj_scatter_mode[N]_mode[M].png # KDE-colored scatter plot for a pair of excited modes (omitted with --no-modeproj)
 ├── analysis_summary.html                 # HTML summary report
 ├── rmsd_plot.png                         # RMSD plot (omitted with --no-rmsd)
 ├── radius_gyration_plot.png              # Radius of gyration plot (omitted with --no-rg)
@@ -757,25 +765,26 @@ analysis/{fel/}
 
 ## Output Files Description
 1. **CSV Files**
-- **`analysis_results.csv`:** Time-series data for RMSD, RoG, SASA, hydrophobic exposure, and secondary structure content
-- **`rmsf.csv`:** Per-residue RMSF values for all analyzed units (all replicas, or all centroids with `-src fel`)
+   - **`analysis_results.csv`:** Time-series data for RMSD, RoG, SASA, hydrophobic exposure, and secondary structure content
+   - **`rmsf.csv`:** Per-residue RMSF values for all analyzed units (all replicas, or all centroids with `-src fel`)
+   - **`mode_projections.csv`:** Combined per-frame mode-projection data across all analyzed units, columns `{unit_col}, time, mode_{N}, ...` where `{unit_col}` is `replica` (`-src pyadmd`) or `centroid_frame` (`-src fel`) and `mode_{N}` are the individual modes excited in `run` (`nm_parsed`). With `-src fel`, reused directly from `fel/mode_projections.csv` when that file already covers every needed mode, instead of being recomputed — see [Mode Projections](#mode-projections). Omitted with `--no-modeproj`.
 
 2. **Plot Files**
-- Individual property plots for each unit (replica, or centroid with `-src fel`)
-- Combined plots showing all units
-- Average plots across all units
+   - Individual property plots for each unit (replica, or centroid with `-src fel`)
+   - Combined plots showing all units
+   - Average plots across all units
+   - **`dccm_plot.png`** / **`dccm_average.png`**: DCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
+   - **`lmi_plot.png`** / **`lmi_average.png`**: LMI heatmap, sequential colormap (LMI has no sign).
+   - **`mode_proj_scatter_mode[N]_mode[M].png`:** One 2D scatter plot per pairwise combination of excited modes, pooling frames from every analyzed unit, colored by KDE density. Omitted with `--no-modeproj`.
 
 3. **Correlation Matrix Files**
-- **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) DCCM matrix, values in [-1, 1]. Omitted with `--no-dccm`.
-- **`dccm_plot.png`** / **`dccm_average.png`**: DCCM heatmap, diverging colormap (red = fully correlated, white = uncorrelated, blue = fully anti-correlated).
-- **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in [0, 1]. Omitted with `--no-lmi`.
-- **`lmi_plot.png`** / **`lmi_average.png`**: LMI heatmap, sequential colormap (LMI has no sign).
+   - **`dccm_matrix.npy`** (per-unit) / **`dccm_average.npy`** (cross-unit): raw (n_Cα × n_Cα) DCCM matrix, values in $`[-1, 1]`$. Omitted with `--no-dccm`.
+   - **`lmi_matrix.npy`** / **`lmi_average.npy`**: raw (n_Cα × n_Cα) LMI matrix, values in $`[0, 1]`$. Omitted with `--no-lmi`.
 
 4. **HTML Summary**
-- Interactive summary report with tables and embedded plots
-- Statistics for each unit and averages across all units
-- An "Incomplete Units" section when any unit hadn't reached its target cycle count at analysis time (see [Handling Incomplete Units](#handling-incomplete-units))
-- Easy navigation and visualization of results
+   - Summary report with tables and embedded plots
+   - Statistics for each unit and averages across all units
+   - An "Incomplete Units" section when any unit hadn't reached its target cycle count at analysis time (see [Handling Incomplete Units](#handling-incomplete-units))
 
 
 Furthermore, some basic analyses are written inside each replica folder at the end of the simulation, they can be found as follows:
@@ -794,21 +803,21 @@ Example files are available at the **[tutorial](tutorial)** folder (human calmod
 ## Using OpenMM inputs and heavy atoms NMs
 ```
 pyadmd run -src OPENMM \
-                     -m HEAVY \
                      -psf tutorial/system.psf \
                      -rst tutorial/system.rst \
-                     -pdb tutorial/system.pdb
+                     -pdb tutorial/system.pdb \
+                     -m HEAVY
 ```
 ## Using NAMD inputs and Cα NMs with custom parameters
 ```
 pyadmd run -src NAMD \
-                     -m CA \
                      -psf tutorial/system.psf \
                      -pdb tutorial/system.pdb \
                      -coor tutorial/system.coor \
                      -vel tutorial/system.vel \
                      -xsc tutorial/system.xsc \
                      -str tutorial/system.str \
+                     -m CA \
                      -nm 7,8 \
                      -ek 0.5 \
                      -t 100 \
@@ -818,14 +827,14 @@ pyadmd run -src NAMD \
 ## Using NAMD inputs and CHARMM NMs without direction correction (standard MDeNM)
 ```
 pyadmd run -src NAMD \
-                     -m CHARMM \
-                     -mod tutorial/system.mod \
                      -psf tutorial/system.psf \
                      -pdb tutorial/system.pdb \
                      -coor tutorial/system.coor \
                      -vel tutorial/system.vel \
                      -xsc tutorial/system.xsc \
                      -str tutorial/system.str \
+                     -m CHARMM \
+                     -mod tutorial/system.mod \
                      --no-correc
 ```
 ## Restart unfinished pyAdMD simulations

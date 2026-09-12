@@ -14,10 +14,15 @@ class OpenMMSimulationEngine:
     """
     Persistent OpenMM simulation wrapper for one aMDeNM replica.
 
-    The (shared) System is passed in; a fresh LangevinMiddleIntegrator and
-    Context are created per replica, giving each replica an independent RNG
-    seed.  Up to three reporters are attached once and fire automatically on
-    every call to simulation.step():
+    The (shared) System is passed in; a fresh integrator and Context are
+    created per replica, giving each replica an independent RNG seed. By
+    default a ``NoseHooverIntegrator`` is used (``thermostat='nose_hoover'``);
+    passing ``thermostat='langevin'`` builds a ``LangevinMiddleIntegrator``
+    instead. The latter is used only for FreeEnergyCalculator's restrained
+    de-excitation phase, where the stochastic Langevin thermostat is
+    specifically relied upon to damp local strain (see
+    ``friction_per_ps``/``timestep_fs`` below). Up to three reporters are
+    attached once and fire automatically on every call to simulation.step():
       - DCDReporter:        1 frame per n_steps-step cycle (only when
                              attach_main_dcd=True; see __init__)
       - StateDataReporter:  1 energy/temperature row per cycle
@@ -25,15 +30,23 @@ class OpenMMSimulationEngine:
 
     All MD runs through run_cycle() or run_deexcitation(); no NAMD binary
     files are written.
+
+    Note (breaking change): checkpoints written by integrator type X cannot
+    be loaded by an engine built with integrator type Y — the internal
+    thermostat state (Nosé-Hoover chain vs. Langevin RNG) is not
+    interchangeable. Checkpoints from versions prior to 3.3.0 (Langevin by
+    default) are not loadable by the current default (Nosé-Hoover); there is
+    no automatic migration.
     """
 
     def __init__(self, console: ConsoleConfig, psf: app.CharmmPsfFile, system: mm.System, temperature: float,
                  platform_name: str = 'auto', n_threads: Optional[int] = None,
                  device_index: int = 0, rep_num: int = 1,
                  is_restart: bool = False, full_ener: bool = False,
-                 n_steps: int = 100, attach_main_dcd: bool = True,
+                 n_steps: int = 50, attach_main_dcd: bool = True,
                  file_prefix: str = 'rep', friction_per_ps: float = 1.0,
-                 timestep_fs: float = 2.0) -> None:
+                 timestep_fs: float = 2.0,
+                 thermostat: str = 'nose_hoover') -> None:
         """
         Initialize the simulation engine for a single replica.
 
@@ -65,19 +78,33 @@ class OpenMMSimulationEngine:
                 pyAdMD replica naming, e.g. rep1.log). FreeEnergyCalculator's
                 centroid engines pass 'centroid_' so log files read
                 centroid_{frame_idx}.log instead of rep{frame_idx}.log.
-            friction_per_ps (float): LangevinMiddleIntegrator friction
-                coefficient, in inverse picoseconds. Defaults to 1.0,
-                matching the value previously hardcoded here -- passing a
-                different value has no effect on any existing caller that
-                omits this argument. Used by
-                FreeEnergyCalculator._run_centroid_md's reinforced
-                last-resort pass to more aggressively damp localized
-                kinetic energy buildup in stubborn centroids.
+            friction_per_ps (float): Thermostat coupling frequency, in inverse
+                picoseconds. The two are not physically equivalent even though
+                both are expressed in ps⁻¹. Its physical meaning depends on
+                ``thermostat``:  for ``'nose_hoover'`` (default) it is the
+                NoseHooverIntegrator collision frequency; for ``'langevin'``
+                it is the LangevinMiddleIntegrator friction coefficient.
+                Used by FreeEnergyCalculator._run_centroid_md's reinforced
+                last-resort pass (always called with ``thermostat='langevin'``)
+                to more aggressively damp localized kinetic energy buildup
+                in stubborn centroids.
             timestep_fs (float): Integration timestep, in femtoseconds.
                 Defaults to 2.0, matching the value previously hardcoded
                 here. Used by the same reinforced pass to give the
                 integrator finer resolution to correct a fast-developing
                 local event before it compounds.
+            thermostat (str): Which integrator/thermostat to build:
+                'nose_hoover' (default) builds a mm.NoseHooverIntegrator
+                (deterministic thermostat chain, OpenMM's built-in defaults
+                for chain length, Yoshida-Suzuki order, and multi-timestep
+                loop count). 'langevin' builds a mm.LangevinMiddleIntegrator
+                (stochastic thermostat), used only for FreeEnergyCalculator's
+                restrained de-excitation phase where the stochastic friction
+                is relied upon to damp local strain during the relief-dip
+                schedule.
+
+        Raises:
+            ValueError: If ``thermostat`` is not 'nose_hoover' or 'langevin'.
         """
         self.console = console
         self.n_atoms = system.getNumParticles()
@@ -88,12 +115,27 @@ class OpenMMSimulationEngine:
             platform_name, n_threads, device_index
         )
 
-        # Fresh integrator per replica (independent Langevin RNG state)
-        integrator = mm.LangevinMiddleIntegrator(
-            temperature * unit.kelvin,
-            friction_per_ps / unit.picosecond,
-            timestep_fs * unit.femtoseconds,
-        )
+        # Fresh integrator per replica (independent RNG/thermostat state).
+        # 'nose_hoover' (default): deterministic Nosé-Hoover thermostat chain,
+        # built via OpenMM's single-chain constructor
+        if thermostat == 'nose_hoover':
+            integrator = mm.NoseHooverIntegrator(
+                temperature * unit.kelvin,
+                friction_per_ps / unit.picosecond,
+                timestep_fs * unit.femtoseconds,
+            )
+        # 'langevin': stochastic Langevin thermostat, reserved for FEL's
+        # restrained de-excitation phase
+        elif thermostat == 'langevin':
+            integrator = mm.LangevinMiddleIntegrator(
+                temperature * unit.kelvin,
+                friction_per_ps / unit.picosecond,
+                timestep_fs * unit.femtoseconds,
+            )
+        else:
+            raise ValueError(
+                f"Unknown thermostat '{thermostat}'; expected 'nose_hoover' or 'langevin'."
+            )
 
         self.simulation = app.Simulation(
             psf.topology, system, integrator, platform, properties

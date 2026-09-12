@@ -198,6 +198,8 @@ def parse_arguments() -> argparse.Namespace:
                               help='Skip DCCM (dynamic cross-correlation matrix) calculation')
     analyze_skip.add_argument('--no-lmi', action='store_true',
                               help='Skip LMI (Linear Mutual Information) calculation')
+    analyze_skip.add_argument('--no-modeproj', action='store_true',
+                              help='Skip mode-projection analysis')
 
 
     #################

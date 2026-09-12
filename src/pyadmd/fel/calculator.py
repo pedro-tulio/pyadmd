@@ -22,8 +22,9 @@ from openmm import app, unit, XmlSerializer
 
 from pyadmd.io.namd import NAMDInputReader
 from pyadmd.io.openmm_restart import OpenMMRestartReader
-from pyadmd.io.state import SystemState, load_reference_state, make_reference_universe
+from pyadmd.io.state import SystemState, load_reference_state
 from pyadmd.io.dcd import _count_dcd_frames
+from pyadmd.modes.projection import get_projection_setup, compute_mode_projections_df
 from pyadmd.simulation.engine import OpenMMSimulationEngine
 from pyadmd.simulation.system_builder import OpenMMSystemBuilder
 
@@ -59,7 +60,7 @@ def _merge_replica_dcds(console, cwd: str, replicas: int, psffile: str) -> mda.U
         if os.path.exists(dcd):
             dcd_files.append(dcd)
         else:
-            print(f"{console.PGM_WRN}DCD not found for {console.WRN} replica{rep}{console.STD}, skipping.")
+            print(f"{console.PGM_WRN}DCD not found for {console.WRN} replica {rep}{console.STD}, skipping.")
     if not dcd_files:
         raise FileNotFoundError("No DCD trajectory files found in any replica directory.")
     print(f"{console.PGM_NAM}Merging {console.EXT}{len(dcd_files)}"
@@ -161,8 +162,9 @@ class FreeEnergyCalculator:
     Protocol:
       1. Merge all replica DCD trajectories into a single pseudo-trajectory.
       2. GROMOS clustering on Cα RMSD → centroid structures.
-      3. Short standard OpenMM MD per centroid: de-excitation phase (discarded)
-         followed by production phase (kept).
+      3. Short standard OpenMM MD per centroid: de-excitation phase (discarded,
+         Langevin thermostat) followed by production phase (kept, Nosé-Hoover
+         thermostat by default).
       4. Project each production frame onto individual original mode vectors (MRMS displacement).
       5. Compute the FEL via population histogram: 1D per mode and 2D for user-specified mode pairs.
 
@@ -1237,6 +1239,13 @@ class FreeEnergyCalculator:
         Restraint reference positions are the centroid coordinates
         themselves. No DCD frames are written during de-excitation.
 
+        The de-excitation engine is always built with
+        ``thermostat='langevin'``: the stochastic Langevin thermostat is
+        specifically relied upon here to damp local strain during the
+        restraint-relief schedule. The subsequent unrestrained production
+        engine uses the class default (Nosé-Hoover) instead, since
+        production is not subject to this localized-strain concern.
+
         Args:
             centroid_state: SystemState with centroid positions and box.
             frame_idx: Centroid's merged-trajectory frame index - the
@@ -1274,7 +1283,9 @@ class FreeEnergyCalculator:
                 is_restart=False, full_ener=False, n_steps=self.n_steps,
                 attach_main_dcd=False,   # no frames written during de-excitation
                 file_prefix='centroid_',
-                friction_per_ps=friction_per_ps, timestep_fs=timestep_fs,
+                timestep_fs=timestep_fs,
+                thermostat='langevin',   # stochastic thermostat for the restrained,
+                                         # strain-relief de-excitation schedule
             )
             # initialize_state assigns MB velocities when velocities_nm_ps is None
             engine.initialize_state(centroid_state)
@@ -1332,6 +1343,7 @@ class FreeEnergyCalculator:
                 is_restart=True, full_ener=False, n_steps=self.n_steps,
                 attach_main_dcd=False,   # production frames go to the dedicated centroid_{frame_idx}.dcd below
                 file_prefix='centroid_',
+                # thermostat omitted: defaults to 'nose_hoover' for production
             )
             prod_engine.initialize_state(production_state)
 
@@ -1415,6 +1427,13 @@ class FreeEnergyCalculator:
              re-assigned at Maxwell-Boltzmann. Appending is then physically
              valid but not bit-identical.
 
+        This engine uses the class default thermostat (Nosé-Hoover), same
+        as the production engine in ``_run_centroid_md``. Loading a
+        checkpoint that was itself written by a Nosé-Hoover engine restores
+        its thermostat chain state exactly; a checkpoint written by an
+        older, Langevin-based version of pyAdMD is not loadable here (see
+        ``OpenMMSimulationEngine``'s breaking-change note).
+
         Args:
             frame_idx: Centroid's merged-trajectory frame index - the
                 stable identifier used to locate its output directory.
@@ -1439,6 +1458,8 @@ class FreeEnergyCalculator:
                 is_restart=True, full_ener=False, n_steps=self.n_steps,
                 attach_main_dcd=False,   # appended frames go to the dedicated centroid_{frame_idx}.dcd below
                 file_prefix='centroid_',
+                # thermostat omitted: defaults to 'nose_hoover', matching
+                # the production engine that originally wrote this centroid
             )
 
             if os.path.exists(self._PROD_CHECKPOINT_FILE):
@@ -1485,6 +1506,13 @@ class FreeEnergyCalculator:
         """
         Resolve Cα selection, reference positions, and normalised mode vectors.
 
+        Thin wrapper around
+        ``pyadmd.modes.projection.get_projection_setup`` -- the same
+        function ``Analyzer``'s mode-projection analysis uses, so both
+        code paths agree on the reference structure / mode-loading /
+        Cα-extraction logic. See that function's docstring for full
+        parameter/return details.
+
         Returns:
             ca_ix_full (numpy.ndarray): (n_ca,) global Cα atom indices in the
                 full system.
@@ -1500,99 +1528,15 @@ class FreeEnergyCalculator:
                 are available to build the reference structure, or if no valid
                 mode vectors could be loaded.
         """
-        # Build reference Universe from saved positions if available,
-        # otherwise fall back to engine-specific file read.
-        if self._ref_positions_ang is not None:
-            u_ref = make_reference_universe(self.psffile, self._ref_positions_ang)
-        elif self._input_engine == 'NAMD' and self.coorfile:
-            u_ref = mda.Universe(self.psffile, self.coorfile, format='NAMDBIN')
-        else:
-            raise RuntimeError(
-                "Cannot load reference positions for FEL projection: "
-                "saved reference state not found and no NAMD coorfile available. "
-                "Re-run 'pyadmd run' with the current version to generate "
-                "inputs/init_reference_positions_ang.npy."
-            )
+        return get_projection_setup(
+            psffile=self.psffile, input_dir=self.input_dir,
+            ref_positions_ang=self._ref_positions_ang,
+            coorfile=self.coorfile, rstfile=self.rstfile,
+            input_engine=self._input_engine, nm_type=self.nm_type,
+            modes=self.fe_modes, console=self.console,
+        )
 
-        prot_atoms = u_ref.select_atoms("protein")
-        ca_atoms   = u_ref.select_atoms("protein and name CA")
-
-        ca_ix_full     = ca_atoms.ix.copy()
-        ca_masses      = ca_atoms.masses.copy()
-        M_ca           = float(ca_masses.sum())
-        ref_pos_ca_ang = ca_atoms.positions.copy()
-
-        # Map global Cα index → position within protein-only ordering
-        prot_to_pos   = {int(gix): pos for pos, gix in enumerate(prot_atoms.ix)}
-        ca_ix_in_prot = np.array([prot_to_pos[int(gix)] for gix in ca_ix_full])
-
-        mode_vectors_ca = {}
-        for mode_num in self.fe_modes:
-            try:
-                vec_full = self._load_single_mode_vector(mode_num)  # (n_prot, 3) Å
-
-                # Guard against an atom-count/order mismatch.
-                if vec_full.shape[0] != len(prot_atoms):
-                    print(f"{self.console.PGM_WRN}Mode {self.console.WRN}{mode_num}{self.console.STD} "
-                          f"vector has {self.console.WRN}{vec_full.shape[0]}{self.console.STD} atoms, "
-                          f"expected {self.console.EXT}{len(prot_atoms)}{self.console.STD} protein "
-                          "atoms; skipping.")
-                    continue
-
-                q_ca     = vec_full[ca_ix_in_prot]                  # (n_ca, 3)
-                norm     = np.linalg.norm(q_ca)
-                if norm < 1e-10:
-                    print(f"{self.console.PGM_WRN}Mode {self.console.WRN}{mode_num}{self.console.STD} Cα vector is "
-                          "near-zero after extraction; skipping.")
-                    continue
-                mode_vectors_ca[mode_num] = q_ca / norm
-            except FileNotFoundError as exc:
-                print(f"{self.console.PGM_WRN}Mode file not found for mode "
-                      f"{self.console.WRN}{mode_num}{self.console.STD}: {self.console.WRN}{exc}{self.console.STD}. Skipping.")
-
-        if not mode_vectors_ca:
-            raise RuntimeError("No valid mode vectors could be loaded for FEL projection.")
-
-        return ca_ix_full, ca_masses, M_ca, ref_pos_ca_ang, mode_vectors_ca
-
-    def _load_single_mode_vector(self, mode_num):
-        """
-        Load a mode vector file and return per-atom Cartesian displacements.
-
-        Args:
-            mode_num (int): Mode number to load.
-
-        Returns:
-            numpy.ndarray: (n_prot_atoms, 3) mode vector positions in Å.
-
-        Raises:
-            FileNotFoundError: If the mode vector file does not exist.
-        """
-        if self.nm_type == 'charmm':
-            path        = f"{self.input_dir}/mode_nm{mode_num}.crd"
-            file_format = "CRD"
-        else:
-            # base_name is derived from the PSF filename
-            base_name = os.path.splitext(os.path.basename(self.psffile))[0]
-            # Recover the actual base_name used at ENM-generation time from the saved
-            # coorfile (NAMD) or rstfile (OpenMM) path
-            if self._input_engine == 'NAMD' and self.coorfile:
-                base_name = os.path.splitext(os.path.basename(self.coorfile))[0]
-            elif self._input_engine != 'NAMD' and self.rstfile:
-                base_name = os.path.splitext(os.path.basename(self.rstfile))[0]
-            prefix = "ca" if self.nm_type == 'ca' else "heavy"
-            path   = (f"{self.input_dir}/{base_name}_enm/"
-                      f"{base_name}_{prefix}_mode_{mode_num}.xyz")
-            file_format = "XYZ"
-
-        # Check NMs files existence.
-        if not os.path.exists(path):
-            raise FileNotFoundError(path)
-
-        u = mda.Universe(path, format=file_format)
-        return u.atoms.positions.copy()
-
-    def compute_mode_projections(self, prod_dcd_files, ca_ix_full, ca_masses,
+    def compute_mode_projections(self, unit_dcd_pairs, ca_ix_full, ca_masses,
                                  M_ca, ref_pos_ca_ang, mode_vectors_ca):
         """
         Compute signed MRMS displacement of every production frame along each
@@ -1601,10 +1545,16 @@ class FreeEnergyCalculator:
             d_j = (1/√M) Σ_i √m_i · (r_i − r₀ᵢ) · q_{ij}
 
         Sign is preserved so that FEL plots distinguish both directions.
+        Thin wrapper around
+        ``pyadmd.modes.projection.compute_mode_projections_df`` (the same
+        function ``Analyzer``'s mode-projection analysis uses), keyed on
+        ``'centroid_frame'`` and this run's per-cycle time step.
 
         Args:
-            prod_dcd_files (list[str]): Paths to per-centroid production DCD
-                files (entries may be None for failed centroid MD runs).
+            unit_dcd_pairs (list[tuple[int, str or None]]): One
+                ``(centroid_frame, dcd_path)`` pair per centroid. Entries
+                with ``dcd_path is None`` (failed centroid MD runs) are
+                skipped.
             ca_ix_full (numpy.ndarray): (n_ca,) global Cα atom indices.
             ca_masses (numpy.ndarray): (n_ca,) Cα atomic masses in amu.
             M_ca (float): Total Cα mass.
@@ -1614,26 +1564,18 @@ class FreeEnergyCalculator:
                 vector}.
 
         Returns:
-            dict: {mode_num: numpy.ndarray (n_frames_total,)} signed MRMS
-                displacements in Å.
+            pandas.DataFrame: Columns ``['centroid_frame', 'time',
+                'mode_{n1}', 'mode_{n2}', ...]``, one row per analyzed
+                production frame across all centroids. Empty (with the
+                correct columns) if no centroid had a usable DCD.
         """
-        projections = {m: [] for m in mode_vectors_ca}
-        sqrt_M_ca   = float(np.sqrt(M_ca))
-        sqrt_masses = np.sqrt(ca_masses)          # (n_ca,) pre-computed
-
-        for dcd_file in prod_dcd_files:
-            if dcd_file is None or not os.path.exists(dcd_file):
-                continue
-            u = mda.Universe(self.psffile, dcd_file, format="DCD")
-            for ts in u.trajectory:
-                curr_ca = u.atoms.positions[ca_ix_full]        # (n_ca, 3) Å
-                disp    = curr_ca - ref_pos_ca_ang              # (n_ca, 3) Å
-                mw_disp = (disp.T * sqrt_masses).T             # mass-weighted
-                for mode_num, q_ca in mode_vectors_ca.items():
-                    mrms = float(np.sum(mw_disp * q_ca)) / sqrt_M_ca
-                    projections[mode_num].append(mrms)
-
-        return {k: np.array(v) for k, v in projections.items()}
+        cycle_ps = self.n_steps * 0.002
+        return compute_mode_projections_df(
+            psffile=self.psffile, unit_dcd_pairs=unit_dcd_pairs,
+            unit_col='centroid_frame', cycle_ps=cycle_ps,
+            ca_ix_full=ca_ix_full, ca_masses=ca_masses, M_ca=M_ca,
+            ref_pos_ca_ang=ref_pos_ca_ang, mode_vectors_ca=mode_vectors_ca,
+        )
 
     # Step 5: FEL computation
 
@@ -1688,18 +1630,24 @@ class FreeEnergyCalculator:
 
     # Output generation
 
-    def generate_outputs(self, fel_1d, fel_2d, projections, clusters,
+    def generate_outputs(self, fel_1d, fel_2d, projections_df, clusters,
                         centroid_records=None):
         """
-        Write clustering CSV, projection .npy files, plots, and HTML summary.
+        Write clustering CSV, mode projections CSV, plots, and HTML summary.
 
         Args:
             fel_1d (dict): {mode_num: (bin_centers, delta_G)} from
                 compute_fel_1d.
             fel_2d (dict): {(mode1, mode2): (xc, yc, delta_G)} from
                 compute_fel_2d.
-            projections (dict): {mode_num: numpy.ndarray} mode projections
-                from compute_mode_projections.
+            projections_df (pandas.DataFrame): Combined per-frame mode
+                projections from ``compute_mode_projections``, columns
+                ``['centroid_frame', 'time', 'mode_{n}', ...]``. Saved
+                once to ``fel/mode_projections.csv`` -- replaces the
+                former per-mode ``projections_mode{N}.npy`` files, and is
+                reusable by ``pyadmd analyze -src fel`` without
+                recomputation whenever it already covers every mode that
+                run needs.
             clusters (list[dict]): Cluster list returned by ``cluster_gromos``.
             centroid_records (list[dict], optional): Per-centroid status
                 collected during ``run()``'s centroid MD loop (keys
@@ -1708,9 +1656,13 @@ class FreeEnergyCalculator:
         """
         self._save_clustering_summary(clusters, centroid_records)
 
+        if not projections_df.empty:
+            projections_csv = f"{self.out_dir}/mode_projections.csv"
+            projections_df.to_csv(projections_csv, index=False)
+            print(f"{self.console.PGM_NAM}Mode projections saved to "
+                  f"{self.console.EXT}{projections_csv}{self.console.STD}.")
+
         for mode_num, (centers, dG) in fel_1d.items():
-            np.save(f"{self.out_dir}/projections_mode{mode_num}.npy",
-                    projections[mode_num])
             pd.DataFrame({'coordinate_A': centers,
                           'delta_G_kcalmol': dG}).to_csv(
                 f"{self.out_dir}/fel_mode{mode_num}.csv", index=False)
@@ -2132,31 +2084,36 @@ class FreeEnergyCalculator:
                    for p in prod_dcd_files)
         print(f"\n{self.console.PGM_NAM}Computing mode projections on "
               f"{self.console.EXT}{n_ok}{self.console.STD} production trajectories...")
-        projections = self.compute_mode_projections(
-            prod_dcd_files, ca_ix_full, ca_masses, M_ca,
+        unit_dcd_pairs = [(cluster['centroid'], dcd_path)
+                          for cluster, dcd_path in zip(clusters, prod_dcd_files)]
+        projections_df = self.compute_mode_projections(
+            unit_dcd_pairs, ca_ix_full, ca_masses, M_ca,
             ref_pos_ca_ang, mode_vectors_ca,
         )
-        if projections:
-            n_proj = len(next(iter(projections.values())))
+        if not projections_df.empty:
             print(f"{self.console.PGM_NAM}Total production frames projected: "
-                  f"{self.console.EXT}{n_proj}{self.console.STD}.")
+                  f"{self.console.EXT}{len(projections_df)}{self.console.STD}.")
 
         # 6. 1D FEL
         fel_1d = {}
-        for mode_num, proj in projections.items():
+        for mode_num in sorted(mode_vectors_ca.keys()):
+            col  = f'mode_{mode_num}'
+            proj = projections_df[col].values if col in projections_df.columns else np.array([])
             if len(proj) > 0:
                 fel_1d[mode_num] = self.compute_fel_1d(proj)
 
         # 7. 2D FEL
         fel_2d = {}
         for m1, m2 in self.pairs_2d:
-            if m1 in projections and m2 in projections:
+            col1, col2 = f'mode_{m1}', f'mode_{m2}'
+            if (not projections_df.empty and col1 in projections_df.columns
+                    and col2 in projections_df.columns):
                 fel_2d[(m1, m2)] = self.compute_fel_2d(
-                    projections[m1], projections[m2]
+                    projections_df[col1].values, projections_df[col2].values
                 )
 
         # 8. All outputs
-        self.generate_outputs(fel_1d, fel_2d, projections, clusters, centroid_records)
+        self.generate_outputs(fel_1d, fel_2d, projections_df, clusters, centroid_records)
 
         print(f"\n{self.console.PGM_NAM}Free energy analysis complete in "
               f"{self.console.EXT}{time.time() - t0:.1f}{self.console.STD} s.")
