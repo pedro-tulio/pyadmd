@@ -16,6 +16,8 @@ from openmm import app, unit
 
 from pyadmd.console import ConsoleConfig
 from pyadmd.io.state import make_reference_universe
+from pyadmd.enm.rtb import build_blocks, project_and_diagonalize
+from pyadmd.simulation.system_builder import OpenMMSystemBuilder
 
 # Ignore warnings
 import warnings
@@ -73,7 +75,8 @@ class ENMCalculator:
                     input_dir: str, psffile: str,
                     cutoff: Optional[float] = None,
                     spring_constant: float = 1.0,
-                    max_modes: Optional[int] = None) -> None:
+                    max_modes: Optional[int] = None,
+                    rtb: bool = False) -> None:
         """
         Setup and run ENM analysis.
 
@@ -90,7 +93,7 @@ class ENMCalculator:
             psffile (str): PSF topology filename.
             cutoff (float, optional): Interaction cutoff distance in Å,
                 forwarded to ``create_system``. Defaults to ``None``, which
-                preserves the previous hardcoded behavior (15.0 Å for CA,
+                preserves the previous hardcoded behavior (15.0 Å for Cα,
                 12.0 Å for heavy-atom models -- see ``create_system``).
             spring_constant (float, optional): ENM harmonic spring constant
                 in kcal/mol/Å², forwarded to ``create_system``. Defaults to
@@ -100,6 +103,17 @@ class ENMCalculator:
                 ``n_modes``. Defaults to ``None``, which preserves the
                 previous behavior (``compute_normal_modes``'s own default
                 of 50 modes).
+            rtb (bool, optional): If True, diagonalize via the RTB
+                (Rotations-Translations of Blocks) reduction instead of
+                direct diagonalization of the full mass-weighted Hessian
+                (see ``pyadmd.enm.rtb``). Blocks are fixed at one residue
+                each. For the HEAVY model, and for nucleic acid residues
+                under the Cα model (represented as a 3-atom P/C1'/C2 SBP
+                block -- see ``_create_ca_system``), this gives a genuine
+                dimensionality reduction (up to 6 DOF per block). Output
+                shape/convention is identical to the non-RTB path, so
+                every downstream consumer is unaffected. Defaults to
+                ``False``.
         """
         # Create output folder
         output_folder = f"{input_dir}/{base_name}_enm"
@@ -109,9 +123,16 @@ class ENMCalculator:
         # Prefix to output files
         prefix = "ca" if nm_type.lower() == 'ca' else "heavy"
 
-        # Build a reference Universe and write a temporary PDB for ENM input
+        if rtb:
+            print(f"{self.console.PGM_NAM}RTB (Rotations-Translations of Blocks) "
+                  f"reduction {self.console.EXT}enabled{self.console.STD} "
+                  "(1 residue per block).")
+
+        # Build a reference Universe and write a temporary PDB for ENM input.
+        # "protein or nucleic" so protein-nucleic complexes are not silently
+        # reduced to their protein subunit only.
         u_ref = make_reference_universe(psffile, positions_ang)
-        prot  = u_ref.select_atoms("protein")
+        prot  = u_ref.select_atoms("protein or nucleic")
         pdb_file = f"{output_prefix}.pdb"
         prot.write(pdb_file, file_format="PDB")
 
@@ -136,12 +157,31 @@ class ENMCalculator:
             system
         )
 
-        # Compute Normal Modes
-        frequencies, enm, eigenvalues = self.compute_normal_modes(
-            mw_hessian,
-            n_modes=max_modes,
-            use_gpu=True
-        )
+        # Compute Normal Modes (direct diagonalization, or RTB-reduced)
+        if rtb:
+            positions_nm = np.array(
+                [[p.x, p.y, p.z] for p in positions.value_in_unit(unit.nanometer)],
+                dtype=np.float64
+            )
+            n_particles = system.getNumParticles()
+            rtb_masses = np.array(
+                [system.getParticleMass(i).value_in_unit(unit.dalton)
+                 for i in range(n_particles)]
+            )
+            rtb_masses[rtb_masses == 0] = 1.0   # match mass_weight_hessian's convention
+
+            blocks = build_blocks(topology)
+            frequencies, enm, eigenvalues = project_and_diagonalize(
+                mw_hessian, positions_nm, rtb_masses, blocks,
+                diagonalize_fn=self.compute_normal_modes,
+                n_modes=max_modes, use_gpu=True, console=self.console,
+            )
+        else:
+            frequencies, enm, eigenvalues = self.compute_normal_modes(
+                mw_hessian,
+                n_modes=max_modes,
+                use_gpu=True
+            )
 
         # Write modes vectors and trajectories
         print(f"{self.console.PGM_NAM}Writing vectors and trajectories for modes {self.console.EXT}{str(nm_parsed)[1:-1]}{self.console.STD}...")
@@ -177,15 +217,21 @@ class ENMCalculator:
     def create_system(self, pdb_file: str, model_type: str = 'ca',
                       cutoff: Optional[float] = None, spring_constant: float = 1.0,
                       output_prefix: str = "input",
-                      selection: Optional[str] = "protein") -> Tuple[mm.System, app.Topology, unit.Quantity]:
+                      selection: Optional[str] = "protein or nucleic") -> Tuple[mm.System, app.Topology, unit.Quantity]:
         """
         Create an Elastic Network Model system based on the specified model type.
 
         Args:
             pdb_file (str): Path to the input PDB file
-            model_type (str): Type of model to create: 'ca' for Cα-only or 'heavy' for heavy-atom ENM
+            model_type (str): Type of model to create: 'ca' for the
+                mixed-resolution Cα (protein) / three-bead SBP (nucleic
+                acid) model, or 'heavy' for heavy-atom ENM. See
+                ``_create_ca_system`` for the SBP bead convention.
             cutoff (float): Cutoff distance for interactions in Å.
-                            If None, uses default values: 15.0Å for CA model, 12.0Å for heavy-atom model
+                            If None, uses default values: 15.0Å for Cα model, 12.0Å for heavy-atom model.
+                            The default is not composition-aware (same value regardless of whether
+                            nucleic acids are present); override explicitly for protein-nucleic
+                            complexes if the default network connectivity is insufficient.
             spring_constant (float): Spring constant for the ENM bonds in kcal/mol/Å²
             output_prefix (str): Prefix for output files
             selection (str, optional): MDAnalysis atom selection string
@@ -257,62 +303,130 @@ class ENMCalculator:
                           spring_constant: float,
                           output_prefix: str) -> Tuple[mm.System, app.Topology, unit.Quantity]:
         """
-        Create a Cα-only ENM system from a PDB file.
+        Create a mixed-resolution ENM system from a PDB file: one Cα bead
+        per protein residue, plus a three-bead SBP (Sugar-Phosphate-Base)
+        representation for nucleic acid residues.
 
-        Extracts Cα atoms, assigns uniform carbon masses (12.011 Da), and
-        connects pairs within [2.9 Å, cutoff] with a harmonic spring.  The
-        reduced structure is saved to {output_prefix}_ca_structure.pdb.
+        For protein residues, the sole representative atom is Cα, as
+        before. For nucleic acid residues (detected via
+        ``OpenMMSystemBuilder.NUCLEIC_RESIDUES``), up to three
+        representative beads are extracted per residue:
+          - ``P``    (phosphate backbone)
+          - ``C1'``  (sugar)
+          - ``C2``   (nitrogenous base)
+        Each bead is assigned the real mass of its representative element
+        (carbon for Cα/C1'/C2, phosphorus for P) via OpenMM's
+        ``element.mass`` -- the same "uniform mass by representative
+        element" convention used for protein Cα (uniform carbon mass),
+        just applied per bead type rather than a single global constant.
+        This also keeps ``ENMAnalyzer.write_modes_from_files``'s post-hoc
+        mass reconstruction (which reads ``atom.element.mass`` back from
+        the written reduced-structure PDB) automatically consistent.
+
+        A 5'-terminal (or otherwise) nucleotide missing its P atom is
+        common on PDB files: that residue simply contributes its C1'/C2
+        beads only, with a summary warning. A nucleotide missing C1' or
+        C2 (unexpected; an incomplete/malformed structure) is warned
+        about separately and likewise, contributes whatever beads it has.
+
+        All representative beads (regardless of residue type) are then
+        connected pairwise within [2.9 Å, cutoff] with a harmonic spring,
+        identically to the original protein-only Cα model. The reduced
+        structure is saved to {output_prefix}_ca_structure.pdb.
 
         Args:
             pdb_file (str): Path to the input PDB file.
-            cutoff (float): Maximum Cα–Cα distance in Å for ENM bond formation.
+            cutoff (float): Maximum inter-bead distance in Å for ENM bond formation.
             spring_constant (float): Harmonic spring constant in kcal mol-1 Å-2.
-            output_prefix (str): Prefix used when writing the Cα PDB output file.
+            output_prefix (str): Prefix used when writing the reduced PDB output file.
 
         Returns:
-            system (openmm.System): System with one particle per Cα atom and a CustomBondForce encoding the ENM potential.
-            topology (openmm.app.Topology): Reduced topology containing only Cα atoms.
-            positions (openmm.unit.Quantity): Cα positions in nanometres.
+            system (openmm.System): System with one particle per representative bead and a CustomBondForce encoding the ENM potential.
+            topology (openmm.app.Topology): Reduced topology containing only the representative beads.
+            positions (openmm.unit.Quantity): Bead positions in nanometres.
 
         Raises:
-            ValueError: If no Cα atoms are found in the PDB file.
+            ValueError: If no representative beads are found in the PDB file.
         """
         pdb = app.PDBFile(pdb_file)
 
-        # Extract Cα atoms and their positions
-        ca_info = []
+        # Bead selection: one Cα per protein residue, up to three
+        # (P, C1', C2) per nucleic acid residue.
+        _NUCLEIC_BEADS = {
+            'P':    app.element.phosphorus,
+            "C1'":  app.element.carbon,
+            'C2':   app.element.carbon,
+        }
+
+        bead_info = []          # (orig_idx, residue, bead_name, element)
         positions_list = []
         for atom in pdb.topology.atoms():
-            if atom.name == 'CA':
-                pos = pdb.positions[atom.index]
-                ca_info.append((atom.index, atom.residue))
-                positions_list.append([pos.x, pos.y, pos.z])
+            resname = atom.residue.name.upper()
+            if resname in OpenMMSystemBuilder.NUCLEIC_RESIDUES:
+                if atom.name not in _NUCLEIC_BEADS:
+                    continue
+                bead_name = atom.name
+                element = _NUCLEIC_BEADS[atom.name]
+            else:
+                if atom.name != 'CA':
+                    continue
+                bead_name = 'CA'
+                element = app.element.carbon
 
-        if not ca_info:
-            print(f"{self.console.PGM_ERR}No Cα atoms found in the structure.")
+            pos = pdb.positions[atom.index]
+            bead_info.append((atom.index, atom.residue, bead_name, element))
+            positions_list.append([pos.x, pos.y, pos.z])
 
-        n_atoms = len(ca_info)
-        print(f"{self.console.PGM_NAM}Selected {self.console.EXT}{n_atoms}{self.console.STD} Cα atoms.")
+        if not bead_info:
+            print(f"{self.console.PGM_ERR}No representative beads (Cα / P / C1' / C2) found in the structure.")
 
-        # Create a simplified topology with only Cα atoms
+        # Terminal/missing-bead diagnostics: compare, per nucleic residue,
+        # which beads were actually collected against the full expected set.
+        nucleic_residues_seen: dict = {}   # residue -> set of bead names collected
+        for _, residue, bead_name, _ in bead_info:
+            if bead_name in _NUCLEIC_BEADS:
+                nucleic_residues_seen.setdefault(residue, set()).add(bead_name)
+
+        missing_p_only = [r for r, beads in nucleic_residues_seen.items()
+                          if 'P' not in beads and beads]
+        missing_sugar_or_base = [r for r, beads in nucleic_residues_seen.items()
+                                 if ("C1'" not in beads or 'C2' not in beads)]
+
+        if missing_p_only:
+            print(f"{self.console.PGM_WRN}{self.console.WRN}{len(missing_p_only)}{self.console.STD} "
+                  "nucleic acid residue(s) had no P atom (commonly the 5' terminus); "
+                  "proceeding with their remaining SBP bead(s) only.")
+        if missing_sugar_or_base:
+            print(f"{self.console.PGM_WRN}{self.console.WRN}{len(missing_sugar_or_base)}{self.console.STD} "
+                  "nucleic acid residue(s) are missing C1' and/or C2 (unexpected -- check "
+                  "for an incomplete/malformed input structure); proceeding with whatever "
+                  "SBP bead(s) each has.")
+
+        n_atoms = len(bead_info)
+        n_nucleic_beads = sum(1 for _, _, b, _ in bead_info if b in _NUCLEIC_BEADS)
+        print(f"{self.console.PGM_NAM}Selected {self.console.EXT}{n_atoms}{self.console.STD} representative beads "
+              f"({self.console.EXT}{n_atoms - n_nucleic_beads}{self.console.STD} protein Cα, "
+              f"{self.console.EXT}{n_nucleic_beads}{self.console.STD} nucleic SBP).")
+
+        # Create a simplified topology with only the representative beads
         new_topology = app.Topology()
         new_chain = new_topology.addChain()
         residue_map = {}
 
-        for i, (orig_idx, residue) in enumerate(ca_info):
+        for orig_idx, residue, bead_name, element in bead_info:
             if residue not in residue_map:
                 new_res = new_topology.addResidue(f"{residue.name}{residue.id}", new_chain)
                 residue_map[residue] = new_res
-            new_topology.addAtom("CA", app.element.carbon, residue_map[residue])
+            new_topology.addAtom(bead_name, element, residue_map[residue])
 
-        # Create the system and add particles
+        # Create the system and add particles, one mass per bead drawn
+        # from its representative element (carbon or phosphorus)
         system = mm.System()
         positions = [mm.Vec3(*pos) * unit.nanometer for pos in positions_list]
         positions_quantity = unit.Quantity(positions)
 
-        carbon_mass = 12.011 * unit.daltons
-        for _ in range(n_atoms):
-            system.addParticle(carbon_mass)
+        for _, _, _, element in bead_info:
+            system.addParticle(element.mass)
 
         # Create ENM force field
         enm_force = mm.CustomBondForce("0.5 * k * (r - r0)**2")
@@ -341,11 +455,11 @@ class ENMCalculator:
               f"min_distance={self.console.EXT}{min_distance_nm}{self.console.STD} Å, k={self.console.EXT}{spring_constant}{self.console.STD} kcal/mol/Å².")
         system.addForce(mm.CMMotionRemover())
 
-        # Save the Cα structure
+        # Save the reduced structure
         ca_pdb_file = f"{output_prefix}_ca_structure.pdb"
         with open(ca_pdb_file, 'w') as f:
             app.PDBFile.writeFile(new_topology, positions_quantity, f)
-        print(f"{self.console.PGM_NAM}Cα structure saved to {self.console.EXT}{ca_pdb_file}{self.console.STD}.")
+        print(f"{self.console.PGM_NAM}Reduced structure saved to {self.console.EXT}{ca_pdb_file}{self.console.STD}.")
 
         # Convert HETATM to ATOM
         self.convert_hetatm_to_atom(ca_pdb_file)
@@ -801,8 +915,13 @@ class ENMCalculator:
             pdb_file (str): Path to the original full PDB file (used for atom mapping).
             output_prefix (str): Directory and filename prefix for output file.
                 File will be named {output_prefix}_mode_{nm}.xyz
-            model_type (str, optional): ENM model type ('ca' for Cα-only or 'heavy'
-                for heavy-atom). Used for atom mapping in the lookup. Default: 'ca'.
+            model_type (str, optional): ENM model type ('ca' for the mixed
+                Cα/SBP model or 'heavy' for heavy-atom). No longer used for
+                atom mapping (the lookup is now always keyed on the reduced
+                topology's own atom name, which already disambiguates
+                protein Cα vs. nucleic P/C1'/C2 beads -- see
+                ``enm_to_original_map`` below); kept for call-site/signature
+                compatibility. Default: 'ca'.
 
         Returns:
             None
@@ -826,10 +945,17 @@ class ENMCalculator:
 
         n_particles = system.getNumParticles()
 
-        # Map ENM atoms to original indices via O(1) lookup
+        # Map ENM atoms to original indices via O(1) lookup. Always keyed by
+        # the reduced topology's own atom name: a pure-protein Cα-model
+        # residue still has exactly one atom named 'CA' (identical lookup
+        # result to before), while a nucleic SBP-model residue now carries
+        # up to three distinctly-named beads ('P', "C1'", 'C2') that must
+        # each resolve to their own original atom. The previous
+        # model_type-conditional special-case assumed a single 'CA' name
+        # per residue regardless of atom.name, which no longer holds.
         enm_to_original_map = []
         for atom in topology.atoms():
-            key = (atom.residue.index, 'CA' if model_type == 'ca' else atom.name)
+            key = (atom.residue.index, atom.name)
             enm_to_original_map.append(orig_lookup[key])
 
         # Write each mode to a separate XYZ file

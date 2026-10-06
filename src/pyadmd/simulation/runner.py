@@ -629,6 +629,13 @@ class SimulationRunner:
         Raises:
             RuntimeError: If the temporary PDB file cannot be written or the ENM
                           calculation fails to produce the expected mode files.
+
+        Note:
+            Forwards ``self.args.rtb`` (defaulting to ``False`` if absent) to
+            ``ENMCalculator.compute_enm``, so a ``--rtb`` run keeps using the
+            RTB block-projection reduction for any mid-run ENM recomputation
+            triggered here, consistent with the initial ``pyadmd run`` ENM
+            computation.
         """
         console = ConsoleConfig()
         now = time.strftime("%H:%M:%S")
@@ -653,7 +660,8 @@ class SimulationRunner:
                 nm_type=self.args.model.lower(),
                 nm_parsed=nm_parsed,
                 input_dir=os.getcwd(),
-                psffile=self.psffile
+                psffile=self.psffile,
+                rtb=getattr(self.args, 'rtb', False)
             )
 
             # Generate new combination using RANDOM factors
@@ -706,6 +714,15 @@ class SimulationRunner:
         Raises:
             FileNotFoundError: If the first mode file is missing.
             RuntimeError: If the combined vector is zero after normalisation.
+
+        Note:
+            This method combines the *written mode vector files*
+            (``{base_name}_{prefix}_mode_{N}.xyz``), which are already in
+            full Cartesian space regardless of whether the ENM behind them
+            was computed via RTB or direct diagonalization (see
+            ``ENMCalculator.compute_enm``/``pyadmd.enm.rtb``'s shared
+            output convention) -- so no RTB-specific handling is needed
+            here.
         """
         console = ConsoleConfig()
         # Generate new random factors for this recombination

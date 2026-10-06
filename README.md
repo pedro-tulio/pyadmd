@@ -26,11 +26,13 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [CHARMM Normal Modes Analysis (Optional)](#charmm-normal-modes-analysis-optional)
   - [ENM Computation](#enm-computation)
     - [Physical Motivation and Coarse-Graining](#physical-motivation-and-coarse-graining)
+    - [Nucleic Acid Support (SBP Model)](#nucleic-acid-support-sbp-model)
     - [Network Construction](#network-construction)
     - [The Hessian Matrix](#the-hessian-matrix)
     - [Normal Mode Analysis and Diagonalization](#normal-mode-analysis-and-diagonalization)
     - [Rigid-Body Modes and the Null Space](#rigid-body-modes-and-the-null-space)
     - [Equipartition and the Physical Meaning of Eigenvalues](#equipartition-and-the-physical-meaning-of-eigenvalues)
+    - [Rotations-Translations of Blocks (RTB)](#rotations-translations-of-blocks-rtb)
   - [Uniform Normal Modes Combination](#uniform-normal-modes-combination)
     - [Problem Definition](#problem-definition)
     - [Mode Subspace Geometry](#mode-subspace-geometry)
@@ -133,6 +135,16 @@ Elastic Network Models offer a powerful and computationally inexpensive alternat
 
 This motivates a **coarse-graining** strategy: instead of representing every atom with a detailed force field, the protein is reduced to a set of representative interaction sites connected by harmonic springs. In the **Cα model** (also called ANM, the Anisotropic Network Model), each residue is represented by a single point placed at its α-carbon. In the **heavy-atom model**, all non-hydrogen atoms are retained, yielding a finer-grained representation at the cost of a larger Hessian matrix. The choice of model involves a tradeoff between computational cost and the resolution of the dynamical description.
 
+### Nucleic Acid Support (SBP Model)
+
+Protein–nucleic acid complexes (*e.g.* transcription factors, ribonucleoproteins, ion channel–RNA interactions) are supported in both ENM models. In the **heavy-atom model**, nucleic acid heavy atoms (backbone and base) are included exactly like protein heavy atoms — no special handling needed. In the **CA model**, a single α-carbon has no nucleic acid analog, so `pyadmd` represents each nucleotide with a **three-bead SBP (Sugar-Phosphate-Base) model** instead of one point:
+
+- **P** — phosphate (backbone)
+- **C1′** — sugar
+- **C2** — nitrogenous base
+
+Each bead is assigned the mass of its representative element (phosphorus for P; carbon for C1′ and C2), following the same "uniform mass by representative atom" convention already used for protein Cα (uniform carbon mass). All beads — protein Cα and nucleic P/C1′/C2 alike — are then connected pairwise by the same distance-cutoff rule described in [Network Construction](#network-construction) below, so a protein–nucleic complex is built as one mixed-resolution network, not two separate ones.
+
 ### Network Construction
 
 Given a set of $`N`$ interaction sites (Cα atoms or heavy atoms) with equilibrium positions $`\mathbf{r}_i^0`$, the elastic network is constructed by connecting every pair of sites $`i`$ and $`j`$ whose equilibrium distance $`r_{ij}^0 = |\mathbf{r}_i^0 - \mathbf{r}_j^0|`$ falls within a specified **cutoff distance** $`r_c`$:
@@ -224,6 +236,18 @@ $$
 $$
 
 where $`\mathbf{H}^+`$ is the Moore-Penrose pseudo-inverse. This relationship is the foundation for the RMSF and DCCM calculations available via `pyadmd enm` (see [ENM (Standalone Normal Mode Analysis)](#enm-standalone-normal-mode-analysis)).
+
+### Rotations-Translations of Blocks (RTB)
+
+Direct diagonalization of the full ENM Hessian becomes the dominant computational cost for large systems, particularly the heavy-atom model. **RTB** trades resolution in the highest-frequency modes for a much smaller diagonalization problem: atoms are grouped into rigid **blocks** (fixed at one residue per block in `pyadmd`), and the mass-weighted Hessian is projected onto the 6-DOF-per-block subspace (3 translations + 3 rotations per block) before diagonalizing. The resulting eigenvectors are projected back to full Cartesian space.
+
+Enabled via the **`--rtb`** flag on both `pyadmd enm` and `pyadmd run` (including any `--recalc` ENM recomputation mid-run — see [Excitation Direction Update](#excitation-direction-update)). Consequences of the fixed one-residue-per-block choice:
+
+- **`-m HEAVY`**: each block contains multiple heavy atoms (backbone + sidechain, protein or nucleic), so it genuinely contributes up to 6 degrees of freedom — the reduced problem has roughly $`6 \times`$ the number of residues degrees of freedom instead of $`3 \times`$ the number of heavy atoms, giving a real speedup for large systems.
+- **`-m CA`, protein residues**: each block is a single Cα atom, which has no meaningful rotation about itself. Therefore, applying RTB on a *purely protein* Cα system present no computational benefit.
+- **`-m CA`, nucleic acid residues**: represented by the three-bead SBP block (P, C1′, C2 — see [Nucleic Acid Support (SBP Model)](#nucleic-acid-support-sbp-model)) rather than a single point, so — like a HEAVY block — it genuinely contributes up to 6 degrees of freedom. A protein–nucleic complex run under `-m CA --rtb` therefore *does* see a real reduction on its nucleic portion, even though its protein portion does not.
+
+**Note:** `--rtb` is not compatible with `-m CHARMM`. It reduces the ENM Hessian, and CHARMM normal modes are precomputed externally and never diagonalized by `pyadmd`.
 
 ## Uniform Normal Modes Combination
 
@@ -394,7 +418,7 @@ $$
 
 The default value for $`\ell_c`$ is $`0.5 m^{1/2} Å`$ (with $`m`$ being atomic mass unit), and for $`\alpha`$ is $`60°`$.
 
-**Note on `--recalc` and reproducibility:** when `--recalc` is set, reaching this threshold triggers a full ENM recomputation from the current structure (`SimulationRunner._recompute_enm_modes`) followed by a *brand-new random* linear combination of the recomputed modes, rather than the deterministic displacement-based correction above. This random re-combination is independent of the `-seed`/`--seed` flag described in [Uniform Normal Modes Combination](#normal-modes-linear-combination) and is not currently reproducible run-to-run — by design, since its purpose is to re-diversify the excitation direction after the mode subspace itself has changed.
+**Note on `--recalc` and reproducibility:** when `--recalc` is set, reaching this threshold triggers a full ENM recomputation from the current structure (`SimulationRunner._recompute_enm_modes`) followed by a *brand-new random* linear combination of the recomputed modes, rather than the deterministic displacement-based correction above. This random re-combination is independent of the `-seed`/`--seed` flag described in [Uniform Normal Modes Combination](#normal-modes-linear-combination) and is not currently reproducible run-to-run — by design, since its purpose is to re-diversify the excitation direction after the mode subspace itself has changed. When `--rtb` is also set, this ENM recomputation is performed via the RTB reduction (see [Rotations-Translations of Blocks (RTB)](#rotations-translations-of-blocks-rtb)) rather than direct diagonalization.
 
 [Back to top ↩](#)
 * ****
@@ -482,6 +506,8 @@ below into it.
 
 - **`--full-ener`**: Write per-term energy decomposition (BOND, ANGLE, DIHED, IMPRP, CMAP, UBREY, NBFIX, NONBONDED, etc.) to `rep{N}_ener_decomp.log` every cycle
 
+- **`--rtb`**: Use RTB (Rotations-Translations of Blocks) reduction for ENM diagonalization instead of direct full-Hessian diagonalization — see [Rotations-Translations of Blocks (RTB)](#rotations-translations-of-blocks-rtb). Blocks are fixed at one residue each. Only valid with `-m CA` or `-m HEAVY` (not `CHARMM`). Also applies to any `--recalc` ENM recomputation mid-run.
+
 ## Append
 ### Parameters
 - **`-t`/`--time`**: Simulation time to append, in ps (**required**)
@@ -524,21 +550,23 @@ Each analysis step can be independently disabled. When skipped, that metric will
 
 ## ENM
 ### Parameters
-- **`-i`/`--input`**: Input PDB file (**required**, unless **`-w`/`--write-modes`** is used)
+- **`-i`/`--input`**: Input PDB file (**required**, unless **`-w`/`--write-modes`** is used).
 
-- **`-o`/`--output`**: Output folder name (**optional**. Default: **`output`**)
+- **`-o`/`--output`**: Output folder name (**optional**. Default: **`output`**).
 
 - **`-m`/`--model`**: Model type, **`CA`** (Cα-only) or **`HEAVY`** (heavy atoms) (**optional**. Default: **`CA`**). Unlike `run`'s `-m`/`--model`, **`CHARMM`** is not a valid choice here — `enm` only computes ENM normal modes, not CHARMM-derived ones.
 
-- **`-sel`/`--selection`**: Atom selection applied to the input PDB before building the ENM (**optional**. Default: **`"protein"`**). Must be written between quotes if it contains spaces, per [MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html).
+- **`-sel`/`--selection`**: Atom selection applied to the input PDB before building the ENM (**optional**. Default: **`"protein or nucleic"`**). Must be written between quotes if it contains spaces, per [MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html).
 
-- **`-c`/`--cutoff`**: Interaction cutoff distance, in Å (**optional**. Default: **`15.0`** for CA, **`12.0`** for HEAVY)
+- **`-c`/`--cutoff`**: Interaction cutoff distance, in Å (**optional**. Default: **`15.0`** for CA, **`12.0`** for HEAVY).
 
-- **`-k`/`--spring-constant`**: ENM harmonic spring constant, in kcal/mol/Å² (**optional**. Default: **`1.0`**)
+- **`-k`/`--spring-constant`**: ENM harmonic spring constant, in kcal/mol/Å² (**optional**. Default: **`1.0`**).
 
-- **`--max-modes`**: Number of non-rigid-body vibrational modes to compute (**optional**. Default: **`50`**)
+- **`--max-modes`**: Number of non-rigid-body vibrational modes to compute (**optional**. Default: **`50`**).
 
-- **`--output-modes`**: Number of modes (file-labeled 1 through N, where label 1 is the first non-rigid mode) to write vectors/trajectories for (**optional**. Default: **`10`**)
+- **`--output-modes`**: Number of modes (file-labeled 1 through N, where label 1 is the first non-rigid mode) to write vectors/trajectories for (**optional**. Default: **`10`**).
+
+- **`--rtb`**: Use RTB reduction for diagonalization instead of direct full-Hessian diagonalization (**optional**. Default: disabled).
 
 ### Skip Flags
 Collectivity, contributions, RMSF, DCCM, and mode vector/trajectory writing can each be independently disabled:

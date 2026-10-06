@@ -8,6 +8,7 @@ import traceback
 from typing import Any
 
 import numpy as np
+from openmm import unit
 
 from pyadmd.console import ConsoleConfig
 from pyadmd.io.dcd import find_last_completed_cycle
@@ -22,6 +23,7 @@ from pyadmd.io.state import (
 )
 from pyadmd.enm.calculator import ENMCalculator
 from pyadmd.enm.analysis import ENMAnalyzer
+from pyadmd.enm.rtb import build_blocks, project_and_diagonalize
 from pyadmd.modes.exciter import ModeExciter
 from pyadmd.simulation.runner import SimulationRunner
 from pyadmd.fel.calculator import FreeEnergyCalculator, export_cluster
@@ -147,6 +149,7 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
     energy   = args.energy
     sim_time = args.time
     replicas = args.replicas
+    use_rtb  = getattr(args, 'rtb', False)
 
     # Derive base_name for ENM output directory naming.
     # NAMD: coorfile prefix; OPENMM: rstfile prefix.
@@ -157,9 +160,9 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
 
     # Store in args for SimulationRunner access
     if args.no_correc:
-        n_steps = 1000 # MD steps per excitation cycle (2 fs/step → 2.0 ps/cycle)
+        n_steps = 1000  # MD steps per excitation cycle (2 fs/step → 2.0 ps/cycle)
     else:
-        n_steps = 100  # MD steps per excitation cycle (2 fs/step → 0.2 ps/cycle)
+        n_steps = 50    # MD steps per excitation cycle (2 fs/step → 0.1 ps/cycle)
     args.n_steps = n_steps
     end_loop = int(sim_time / (n_steps * 0.002))
 
@@ -169,13 +172,13 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
               f"{console.STD}{console.HGH} and writing normal mode vectors "
               f"{console.EXT}{modes}{console.STD}.")
         enm_calculator.compute_enm(init_pos_ang, base_name, nm_type,
-                                   nm_parsed, input_dir, psffile)
+                                   nm_parsed, input_dir, psffile, rtb=use_rtb)
     elif nm_type == "heavy":
         print(f"\n{console.PGM_NAM}{console.HGH}Computing {console.EXT}Heavy atoms ENM"
               f"{console.STD}{console.HGH} and writing normal mode vectors "
               f"{console.EXT}{modes}{console.STD}.")
         enm_calculator.compute_enm(init_pos_ang, base_name, nm_type,
-                                   nm_parsed, input_dir, psffile)
+                                   nm_parsed, input_dir, psffile, rtb=use_rtb)
     elif nm_type == "charmm":
         print(f"\n{console.PGM_NAM}Writing {console.EXT}CHARMM{console.STD} "
               f"normal mode vectors {console.EXT}{modes}{console.STD}.")
@@ -594,14 +597,20 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
 
       - ``-w/--write-modes`` set: re-derive vector/trajectory files from a
         previously completed run's saved arrays, without recomputing the
-        ENM (``ENMAnalyzer.write_modes_from_files``).
+        ENM (``ENMAnalyzer.write_modes_from_files``). ``--rtb`` has no
+        effect on this path (no diagonalization is performed here) and a
+        warning is printed if both are given.
       - Otherwise: run a full ENM computation from ``-i/--input``, save
         the filtered mode/frequency arrays plus the reduced structure
         PDB (both written by ``ENMCalculator.create_system``/
         ``compute_normal_modes``), then delegate to the same
         ``write_modes_from_files`` path used by ``-w`` for the actual
         vector/trajectory writing -- so the two paths always agree on
-        file format, and the logic is written once.
+        file format, and the logic is written once. When ``--rtb`` is
+        set, diagonalization is routed through the RTB block-projection
+        reduction (``pyadmd.enm.rtb``) instead of direct diagonalization
+        of the full Hessian, mirroring ``ENMCalculator.compute_enm``'s
+        own ``rtb`` branch.
 
     Args:
         args: Parsed CLI arguments for the ``enm`` subcommand.
@@ -613,6 +622,9 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
 
     # -w / --write-modes: post-hoc path, no recomputation needed
     if args.write_modes is not None:
+        if getattr(args, 'rtb', False):
+            print(f"{console.PGM_WRN}--rtb has no effect with -w/--write-modes "
+                  "(no diagonalization is performed on this path); ignoring.")
         print(f"{console.PGM_NAM}{console.TLE}Write ENM modes from a previous run{console.STD}\n")
         try:
             mode_numbers = analyzer.parse_mode_string(args.write_modes)
@@ -640,6 +652,11 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
     output_prefix = os.path.join(output_folder, base_name)
     model_type    = args.model.lower()
     prefix        = "ca" if model_type == "ca" else "heavy"
+    use_rtb       = getattr(args, 'rtb', False)
+
+    if use_rtb:
+        print(f"{console.PGM_NAM}RTB (Rotations-Translations of Blocks) "
+              f"{console.EXT}enabled{console.STD} (1 residue per block).")
 
     # System build + Hessian + diagonalization
     try:
@@ -653,9 +670,29 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
         )
         hessian    = enm_calculator.hessian_enm(system, positions)
         mw_hessian = enm_calculator.mass_weight_hessian(hessian, system)
-        frequencies, modes, eigenvalues = enm_calculator.compute_normal_modes(
-            mw_hessian, n_modes=args.max_modes, use_gpu=not args.no_gpu,
-        )
+
+        if use_rtb:
+            positions_nm = np.array(
+                [[p.x, p.y, p.z] for p in positions.value_in_unit(unit.nanometer)],
+                dtype=np.float64
+            )
+            n_particles = system.getNumParticles()
+            rtb_masses = np.array(
+                [system.getParticleMass(i).value_in_unit(unit.dalton)
+                 for i in range(n_particles)]
+            )
+            rtb_masses[rtb_masses == 0] = 1.0
+
+            blocks = build_blocks(topology)
+            frequencies, modes, eigenvalues = project_and_diagonalize(
+                mw_hessian, positions_nm, rtb_masses, blocks,
+                diagonalize_fn=enm_calculator.compute_normal_modes,
+                n_modes=args.max_modes, use_gpu=not args.no_gpu, console=console,
+            )
+        else:
+            frequencies, modes, eigenvalues = enm_calculator.compute_normal_modes(
+                mw_hessian, n_modes=args.max_modes, use_gpu=not args.no_gpu,
+            )
     except Exception as exc:
         print(f"{console.PGM_ERR}ENM computation failed: {console.ERR}{exc}{console.STD}")
         traceback.print_exc()

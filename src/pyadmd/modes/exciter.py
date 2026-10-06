@@ -56,7 +56,9 @@ class ModeExciter:
             base_name (str): Base filename stem used to resolve ENM output file paths
                 (e.g. ``"system"`` → ``inputs/system_enm/system_ca_mode_7.xyz``).
                 Replaces the former ``coorfile`` parameter.
-            mda_U (mda.Universe): MDAnalysis Universe for reference structure atom count.
+            mda_U (mda.Universe): MDAnalysis Universe for the reference structure.
+                No longer used to determine atom count (see ``natom`` below);
+                kept for call-site/signature compatibility.
             seed (int): Random seed for the initial-coordinate draw used to start the
                 repulsion algorithm (only relevant when ``P != 2N``, since the
                 ``P == 2N`` cross-polytope path is already deterministic). Fixing this
@@ -66,12 +68,17 @@ class ModeExciter:
 
         Returns:
             numpy.ndarray: Combined mode vectors, shape (P, natom, 3), where natom is
-                the number of protein atoms. Each row is a normalized linear combination
-                of the input mode vectors, suitable for use in replica simulations.
+                the atom count of the loaded mode vector files themselves (protein-only,
+                or protein+nucleic acid for a system built with nucleic acid residues
+                included -- see ``ENMCalculator.compute_enm``). Each row is a normalized
+                linear combination of the input mode vectors, suitable for use in
+                replica simulations.
 
         Raises:
             FileNotFoundError: If mode vector files cannot be located.
-            ValueError: If mode vectors have incompatible dimensions.
+            ValueError: If mode vectors have incompatible dimensions, or if a
+                loaded mode vector's flattened length is not a multiple of 3
+                (malformed mode file).
 
         Note:
             The algorithm uses QR orthonormalization to create a stable orthonormal basis,
@@ -80,7 +87,6 @@ class ModeExciter:
             physical Cartesian space.
         """
         N = len(nm_parsed)
-        natom = mda_U.atoms.select_atoms("protein").n_atoms
 
         # Load mode vectors and flatten to (N, natom*3)
         mode_vectors = []
@@ -98,6 +104,19 @@ class ModeExciter:
 
         # Shape: (N, natom*3)
         mode_matrix = np.array(mode_vectors)
+
+        # natom is derived from the loaded mode vectors themselves, rather
+        # than a separately hardcoded protein-only atom count that silently
+        # drifts out of sync whenever the ENM's own atom selection changes
+        # (e.g. ENMCalculator.compute_enm's "protein or nucleic" selection
+        # for nucleic-acid-containing systems). This is the single source
+        # of truth for what the ENM was actually built on.
+        if mode_matrix.shape[1] % 3 != 0:
+            raise ValueError(
+                f"Mode vector flattened length ({mode_matrix.shape[1]}) is not a "
+                "multiple of 3 -- malformed mode file(s)."
+            )
+        natom = mode_matrix.shape[1] // 3
 
         # Orthonormalise the mode basis via QR decomposition.
         Q, _ = np.linalg.qr(mode_matrix.T)

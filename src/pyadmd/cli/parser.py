@@ -73,8 +73,8 @@ def parse_arguments() -> argparse.Namespace:
                              help="Excitation energy (default: 2 kcal/mol)")
     run_optional.add_argument('-t', '--time', action="store", type=int, default=250, metavar='PS',
                              help="Total simulation time (default: 250 ps)")
-    run_optional.add_argument('-sel', '--selection', action="store", type=str, default="protein",
-                             help="Atom selection to apply the energy injection (default: protein)")
+    run_optional.add_argument('-sel', '--selection', action="store", type=str, default="protein or nucleic",
+                             help="Atom selection to apply the energy injection (default: protein or nucleic)")
     run_optional.add_argument('-rep', '--replicas', action="store", type=int, default=10, metavar='N',
                              help="Number of aMDeNM replicas to run (default: 10)")
     run_optional.add_argument('-seed', '--seed', action="store", type=int, default=42,
@@ -91,6 +91,9 @@ def parse_arguments() -> argparse.Namespace:
     run_flags.add_argument('--full-ener', action='store_true',
                           help='Write per-term energy decomposition (BOND, ANGLE, DIHED, etc.) '
                                'to rep{N}_ener_decomp.log each cycle')
+    run_flags.add_argument('--rtb', action='store_true',
+                          help='Use RTB reduction for ENM diagonalization. '
+                               'Also applies to any --recalc ENM recomputation mid-run.')
 
 
     #####################
@@ -227,8 +230,8 @@ def parse_arguments() -> argparse.Namespace:
         choices=["CA", "HEAVY"],
         help='Model type: CA (Cα-only) or HEAVY (heavy atoms) (default: CA)')
     enm_optional.add_argument(
-        '-sel', '--selection', action="store", type=str, default="protein",
-        help='Atom selection to build the ENM (default: "protein")')
+        '-sel', '--selection', action="store", type=str, default="protein or nucleic",
+        help='Atom selection to build the ENM (default: "protein or nucleic")')
     enm_optional.add_argument(
         '-c', '--cutoff', type=float, default=None, metavar='Å',
         help='Interaction cutoff distance in Å '
@@ -250,6 +253,10 @@ def parse_arguments() -> argparse.Namespace:
              'Accepts comma-separated integers and inclusive ranges '
              '(start:end), e.g. "26,41" "7:10" "42,44:50". Requires '
              '-o/--output pointing to an existing output directory. ')
+    enm_optional.add_argument(
+        '--rtb', action='store_true',
+        help='Use RTB reduction for ENM diagonalization. '
+            'Also applies to any --recalc ENM recomputation mid-run.')
 
     # Optional skip flags for ENM
     enm_flags = opt_enm.add_argument_group('Skip flags (disable individual outputs)')
@@ -300,6 +307,11 @@ def parse_arguments() -> argparse.Namespace:
     if hasattr(args, 'option') and args.option == 'run':
         if args.model == 'CHARMM' and args.recalc:
             opt_run.error("ENM recalculation is not compatible with CHARMM normal modes")
+
+    if hasattr(args, 'option') and args.option == 'run':
+        if args.model == 'CHARMM' and args.rtb:
+            opt_run.error("RTB (--rtb) is not compatible with -m CHARMM; RTB operates on the "
+                          "ENM Hessian, not on precomputed CHARMM modes.")
 
     # Validate input-engine-specific file requirements
     if hasattr(args, 'option') and args.option == 'run':
