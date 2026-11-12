@@ -2,8 +2,32 @@
 
 import argparse
 import sys
+from typing import List
 
 from pyadmd.console import ConsoleConfig
+
+
+def _parse_mode_list(raw: str, flag: str) -> List[int]:
+    """
+    Parse a comma-separated list of normal mode numbers.
+
+    Args:
+        raw (str): Comma-separated mode numbers, e.g. ``"7,8,9"``.
+        flag (str): Name of the originating CLI flag, used in error messages.
+
+    Returns:
+        list[int]: Mode numbers in the order given.
+
+    Raises:
+        ValueError: If any token is not an integer or the list is empty.
+    """
+    try:
+        modes = [int(tok.strip()) for tok in raw.split(',') if tok.strip()]
+    except ValueError:
+        raise ValueError(f"{flag} must be a comma-separated list of integers (got '{raw}').")
+    if not modes:
+        raise ValueError(f"{flag} must contain at least one mode number.")
+    return modes
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -79,6 +103,12 @@ def parse_arguments() -> argparse.Namespace:
                              help="Number of aMDeNM replicas to run (default: 10)")
     run_optional.add_argument('-seed', '--seed', action="store", type=int, default=42,
                              help="Random seed for the uniform mode-combination generation (default: 42)")
+    run_optional.add_argument('--cycle-steps', action="store", type=int, default=50, metavar='N',
+                             help="MD steps per adaptive/constant excitation cycle "
+                                  "(default: 50; with a 2 fs timestep, 50 = 0.1 ps). "
+                                  "Ignored with --no-correc (fixed at 1000 steps = 2 ps)")
+    run_optional.add_argument('--nh-frequency', action="store", type=float, default=1.0, metavar='PS⁻¹',
+                             help="Nose-Hoover thermostat coupling frequency in ps⁻¹ (default: 1.0)")
 
     # Flags for run
     run_flags = opt_run.add_argument_group('Flags')
@@ -94,6 +124,24 @@ def parse_arguments() -> argparse.Namespace:
     run_flags.add_argument('--rtb', action='store_true',
                           help='Use RTB reduction for ENM diagonalization. '
                                'Also applies to any --recalc ENM recomputation mid-run.')
+
+    # Adaptive ENM recalculation options (only meaningful with -r/--recalc)
+    run_recalc = opt_run.add_argument_group('ENM recalculation options (require -r/--recalc)')
+    run_recalc.add_argument('--recalc-method', action="store", type=str.lower,
+                            default="random", choices=["random", "harmonized"], metavar='METHOD',
+                            help="Excitation direction update after ENM recalculation: "
+                                 "'random' draws a new random mode combination (default); "
+                                 "'harmonized' tracks the active subspace inside a larger "
+                                 "search subspace and transports the corrected direction Q "
+                                 "(SVD of the subspace overlap, Procrustes harmonization)")
+    run_recalc.add_argument('--subspace-search-modes', action="store", type=str, default=None, metavar='MODES',
+                            help="Comma-separated ENM modes defining the larger search "
+                                 "subspace M for --recalc-method harmonized; must contain "
+                                 "every mode given in -nm (default: same modes as -nm)")
+    run_recalc.add_argument('--subspace-alpha', action="store", type=float, default=1.0, metavar='ALPHA',
+                            help="Mixing factor for --recalc-method harmonized, in [0, 1]: "
+                                 "Q_final = norm[(1-alpha)*Q_corr + alpha*Q_harm] "
+                                 "(default: 1.0)")
 
 
     #####################
@@ -312,6 +360,40 @@ def parse_arguments() -> argparse.Namespace:
         if args.model == 'CHARMM' and args.rtb:
             opt_run.error("RTB (--rtb) is not compatible with -m CHARMM; RTB operates on the "
                           "ENM Hessian, not on precomputed CHARMM modes.")
+
+    # Validate numeric run parameters
+    if hasattr(args, 'option') and args.option == 'run':
+        if args.cycle_steps < 1:
+            opt_run.error("--cycle-steps must be a positive integer")
+        if args.nh_frequency <= 0.0:
+            opt_run.error("--nh-frequency must be positive")
+
+    # Validate ENM recalculation options (fail fast, before any simulation starts)
+    if hasattr(args, 'option') and args.option == 'run':
+        if args.recalc_method == 'harmonized':
+            if not args.recalc:
+                opt_run.error("--recalc-method harmonized requires -r/--recalc")
+            if not 0.0 <= args.subspace_alpha <= 1.0:
+                opt_run.error("--subspace-alpha must be between 0 and 1")
+            try:
+                active = _parse_mode_list(args.modes, "-nm/--modes")
+                search = (_parse_mode_list(args.subspace_search_modes, "--subspace-search-modes")
+                          if args.subspace_search_modes is not None else list(active))
+            except ValueError as exc:
+                opt_run.error(str(exc))
+            if len(set(search)) != len(search):
+                opt_run.error("--subspace-search-modes contains duplicate mode numbers")
+            if len(search) < len(active):
+                opt_run.error(f"the search subspace must satisfy M >= m "
+                              f"(got M={len(search)}, m={len(active)})")
+            missing = [n for n in active if n not in search]
+            if missing:
+                opt_run.error(f"every mode given in -nm must be contained in "
+                              f"--subspace-search-modes; missing: {missing}")
+        else:
+            if args.subspace_search_modes is not None or args.subspace_alpha != 1.0:
+                opt_run.error("--subspace-search-modes and --subspace-alpha require "
+                              "--recalc-method harmonized")
 
     # Validate input-engine-specific file requirements
     if hasattr(args, 'option') and args.option == 'run':

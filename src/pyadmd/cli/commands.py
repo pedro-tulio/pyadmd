@@ -160,9 +160,9 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
 
     # Store in args for SimulationRunner access
     if args.no_correc:
-        n_steps = 1000  # MD steps per excitation cycle (2 fs/step → 2.0 ps/cycle)
+        n_steps = 1000  # Standard MDeNM: 1000 MD steps per cycle (2 fs/step → 2.0 ps/cycle)
     else:
-        n_steps = 50    # MD steps per excitation cycle (2 fs/step → 0.1 ps/cycle)
+        n_steps = args.cycle_steps  # Adaptive/constant MDeNM (--cycle-steps, default 50 → 0.1 ps/cycle)
     args.n_steps = n_steps
     end_loop = int(sim_time / (n_steps * 0.002))
 

@@ -44,6 +44,11 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
     - [Normal Modes Linear Combination](#normal-modes-linear-combination)
   - [Kinetic Energy Control](#kinetic-energy-control)
   - [Excitation Direction Update](#excitation-direction-update)
+  - [ENM Recalculation and Subspace Harmonization](#enm-recalculation-and-subspace-harmonization)
+    - [Active Subspace and Search Space](#active-subspace-and-search-space)
+    - [Overlap Matrix and SVD](#overlap-matrix-and-svd)
+    - [Procrustes Harmonization](#procrustes-harmonization)
+    - [Transport of *Q* and Controlled Mixing](#transport-of-q-and-controlled-mixing)
 - [pyAdMD Applications](#pyadmd-applications)
   - [ENM](#enm)
   - [Physical force-field based normal modes](#physical-force-field-based-normal-modes)
@@ -59,6 +64,7 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
     - [Parameters](#parameters)
     - [Files](#files)
     - [Feature Flags](#feature-flags)
+    - [Run Output Files](#run-output-files)
   - [Append](#append)
     - [Parameters](#parameters-1)
   - [Free Energy](#free-energy)
@@ -95,6 +101,7 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [Using OpenMM inputs and heavy atoms NMs](#using-openmm-inputs-and-heavy-atoms-nms)
   - [Using NAMD inputs and Cα NMs with custom parameters](#using-namd-inputs-and-cα-nms-with-custom-parameters)
   - [Using NAMD inputs and CHARMM NMs without direction correction (standard MDeNM)](#using-namd-inputs-and-charmm-nms-without-direction-correction-standard-mdenm)
+  - [Using ENM recalculation with harmonized subspace transport](#using-enm-recalculation-with-harmonized-subspace-transport)
   - [Restart unfinished pyAdMD simulations](#restart-unfinished-pyadmd-simulations)
   - [Append 100 ps to previously finished pyAdMD simulations](#append-100-ps-to-previously-finished-pyadmd-simulations)
   - [Analyze pyAdMD simulations (all frames)](#analyze-pyadmd-simulations-all-frames)
@@ -382,7 +389,7 @@ where $`\mathbf{M}_{\mathrm{nm}}^+`$ denotes the Moore–Penrose pseudoinverse o
 
 **Reproducibility:** the only stochastic step in this procedure is the initial placement of the $`P`$ points on $`S^{N-1}`$ before the repulsion loop runs (skipped entirely when $`P=2N`$, see above). This is controlled by a seeded RNG (`-seed`/`--seed`, default `42`), so `pyadmd run` calls with identical arguments produce identical excitation vectors and `factors.csv` — see [Run Parameters](#parameters).
 
-**Note:** ENM recomputation under `--recalc` (see [Excitation Direction Update](#excitation-direction-update)) draws a *new* random combination each time it fires and is intentionally **not** covered by `--seed`, since its purpose is to re-diversify the excitation direction mid-simulation.
+**Note:** ENM recomputation under `--recalc` (see [Excitation Direction Update](#excitation-direction-update)) draws a *new* random combination each time it fires with the default `random` method and is intentionally **not** covered by `--seed`, since its purpose is to re-diversify the excitation direction mid-simulation. The `harmonized` method (see [ENM Recalculation and Subspace Harmonization](#enm-recalculation-and-subspace-harmonization)) involves no random draw.
 
 ## Kinetic Energy Control
 The additional kinetic energy injected in the system has a fast dissipation rate. Therefore, the program constantly checks the injection energy level and rescale the velocities along the excited direction whenever it is necessary. The kinetic energy along the normalized excitation vector $`\mathbf{Q}`$ direction is calculated by projecting first the current velocities to the excitation direction $`\mathbf{Q}`$ as $`\mathbf{V}_p = (\mathbf{V}_{curr} \cdot \mathbf{Q}) \cdot \mathbf{Q}`$, where $`\mathbf{V}_{p}`$ and $`\mathbf{V}_{curr}`$ the $`3N`$-dimensional vectors of the projected and current atomic velocities, respectively. The kinetic energy along the excitation direction is thus given by:
@@ -392,6 +399,8 @@ E_k = \frac{1}{2} \mathbf{V}_{p}^T \mathbf{M}\ \mathbf{V}_p
 $$
 
 where $`\mathbf{M}`$ is the diagonal mass matrix. At the beginning of each short simulation interval, the remaining excitation energy ($`E_k`$) is adjusted to the desired excitation level ($`E_{exc}`$) by modifying the atomic velocities so $`\mathbf{V}_{new} = \mathbf{V}_{curr} + (\mathbf{V}_{exc} - \mathbf{V}_{p})`$.
+
+Two thresholds are defined around the target energy, $`0.75\,E_{exc}`$ and $`1.25\,E_{exc}`$. Whenever $`E_k`$ leaves this band, only the velocity component along $`\mathbf{Q}`$ is replaced by the target excitation velocity, while all orthogonal components are preserved. This is a directional excitation/re-injection, not a global thermostat; the thermostat acting on the whole system is the Nosé-Hoover coupling (`--nh-frequency`).
 
 With this procedure, the system is kept in a continuous excited state, allowing an effective small, "adiabatic-like" energy injection. The energy injection control is done by projecting the velocities computed during the simulation onto the excited vector, thus obtaining and rescaling the kinetic energy corresponding to it.
 
@@ -418,7 +427,66 @@ $$
 
 The default value for $`\ell_c`$ is $`0.5 m^{1/2} Å`$ (with $`m`$ being atomic mass unit), and for $`\alpha`$ is $`60°`$.
 
-**Note on `--recalc` and reproducibility:** when `--recalc` is set, reaching this threshold triggers a full ENM recomputation from the current structure (`SimulationRunner._recompute_enm_modes`) followed by a *brand-new random* linear combination of the recomputed modes, rather than the deterministic displacement-based correction above. This random re-combination is independent of the `-seed`/`--seed` flag described in [Uniform Normal Modes Combination](#normal-modes-linear-combination) and is not currently reproducible run-to-run — by design, since its purpose is to re-diversify the excitation direction after the mode subspace itself has changed. When `--rtb` is also set, this ENM recomputation is performed via the RTB reduction (see [Rotations-Translations of Blocks (RTB)](#rotations-translations-of-blocks-rtb)) rather than direct diagonalization.
+**Note on `--recalc` and reproducibility:** when `--recalc` is set, reaching this threshold triggers a full ENM recomputation from the current structure (`SimulationRunner._recompute_enm_modes`). With the default `--recalc-method random`, this is followed by a *brand-new random* linear combination of the recomputed modes, rather than the deterministic displacement-based correction above. This random re-combination is independent of the `-seed`/`--seed` flag described in [Uniform Normal Modes Combination](#normal-modes-linear-combination) and is not currently reproducible run-to-run — by design, since its purpose is to re-diversify the excitation direction after the mode subspace itself has changed. With `--recalc-method harmonized`, ENM recomputation is instead performed only after a true angular correction and the corrected direction is transported through the harmonized mode subspace, with no random component (see [ENM Recalculation and Subspace Harmonization](#enm-recalculation-and-subspace-harmonization)). When `--rtb` is also set, the ENM recomputation is performed via the RTB reduction (see [Rotations-Translations of Blocks (RTB)](#rotations-translations-of-blocks-rtb)) rather than direct diagonalization.
+
+## ENM Recalculation and Subspace Harmonization
+As the conformation evolves, the ENM modes computed on the initial structure progressively lose their meaning, and individual mode indices computed on a new conformation do not need to correspond to the "same" collective motion: modes may exchange order, change sign, or mix with neighboring modes. The **harmonized** method (`-r`/`--recalc` `--recalc-method harmonized`) addresses this by tracking a *collective subspace* instead of individual mode numbers. It explicitly separates three operations:
+
+1. the **physical correction** $`\mathbf{Q}_{corr}`$, issued from the observed structural displacement ([Excitation Direction Update](#excitation-direction-update));
+2. the **ENM recalculation**, triggered only when a true angular correction has occurred;
+3. the **harmonization** of the new subspace within a larger search space, followed by the controlled **transport** of $`\mathbf{Q}`$.
+
+### Active Subspace and Search Space
+Let $`\mathbf{U}_m`$ be the previous active subspace of dimension $`m`$ (the modes given by `-nm`) and $`\mathbf{V}_M`$ the new search subspace of dimension $`M \geq m`$ (the modes given by `--subspace-search-modes`; $`M = m`$ when omitted):
+
+$$
+\mathbf{U} = [\mathbf{u}_1 \dots \mathbf{u}_m] ; \qquad \mathbf{V} = [\mathbf{v}_1 \dots \mathbf{v}_M]
+$$
+
+Columns of $`\mathbf{U}`$ and $`\mathbf{V}`$ are expressed in the same mass-weighted coordinate space, restricted to the excitation atoms (the Cα atoms of the protein and the SBP beads of nucleic acids that fall within `-sel`; all heavy atoms for `-m HEAVY`). The new structure is first superposed onto the previous one by a mass-weighted Kabsch rotation, the new modes are rotated into the same frame, and both bases are orthonormalized by QR. The problem is therefore not to identify "the new mode 7" in a strict sense, but to recover, within $`\mathbf{V}_M`$, the $`m`$-dimensional component that best represents the previous collective subspace.
+
+### Overlap Matrix and SVD
+The rectangular $`m \times M`$ overlap matrix is decomposed by thin SVD:
+
+$$
+\mathbf{S} = \mathbf{U}^\top \mathbf{V} = \mathbf{L}\, \boldsymbol{\Sigma}\, \mathbf{R}^\top
+$$
+
+The singular values $`\sigma_i`$ are the cosines of the principal angles between the previous active subspace and the best $`m`$-dimensional subspace contained in $`\mathbf{V}_M`$:
+
+$$
+\sigma_i = \cos \theta_i, \qquad \Omega = \frac{1}{m} \sum_{i=1}^{m} \sigma_i^2
+$$
+
+A $`\sigma_i`$ close to 1 corresponds to a small principal angle, *i.e.* a well-conserved collective direction; a decrease of $`\sigma_i`$ signals that part of the active subspace is no longer well represented in the chosen search space. $`\Omega`$ is a global indicator of subspace conservation but does not replace the individual singular values and principal angles: a high mean can hide one poorly conserved direction, so the diagnostics must be read jointly.
+
+### Procrustes Harmonization
+The right singular vectors associated with the $`m`$ singular values define, inside $`\mathbf{V}_M`$, the combination that maximizes the overlap with $`\mathbf{U}_m`$. With $`\mathbf{R}_m`$ the corresponding $`M \times m`$ block of $`\mathbf{R}`$:
+
+$$
+\mathbf{V}_{match} = \mathbf{V}\, \mathbf{R}_m, \qquad \mathbf{V}_{harm} = \mathbf{V}_{match}\, \mathbf{L}^\top
+$$
+
+This is a Procrustes-type harmonization: it does not change the selected subspace ($`\mathrm{span}(\mathbf{V}_{harm}) = \mathrm{span}(\mathbf{V}_{match})`$) but orients its basis consistently with the previous one. The formulation naturally handles permutations, sign inversions and mixing between neighboring modes, avoiding any excessive physical meaning attached to individual mode numbers. The matching coefficients (the entries of $`\mathbf{R}_m`$) report how the $`M`$ search modes combine into each of the $`m`$ matched directions.
+
+### Transport of *Q* and Controlled Mixing
+The transport acts on $`\mathbf{Q}_{corr}`$, the direction issued from the observed physical/angular correction; it does not replace that correction by a purely modal direction. The harmonization intervenes *after* the correction and constrains its continuity within the new collective subspace:
+
+$$
+\mathbf{Q}_{harm} = \frac{P(\mathbf{V}_{harm})\, \mathbf{Q}_{corr}}{\|P(\mathbf{V}_{harm})\, \mathbf{Q}_{corr}\|}
+$$
+
+The projection can reduce the norm if part of $`\mathbf{Q}_{corr}`$ lies outside the harmonized subspace; $`\mathbf{Q}_{harm}`$ is therefore renormalized, and its sign is chosen to remain continuous with $`\mathbf{Q}_{corr}`$. The parameter $`\alpha`$ (`--subspace-alpha`) then controls the mixing between the physical correction and the transported direction:
+
+$$
+\mathbf{Q}_{final} = \frac{(1 - \alpha)\, \mathbf{Q}_{corr} + \alpha\, \mathbf{Q}_{harm}}{\|(1 - \alpha)\, \mathbf{Q}_{corr} + \alpha\, \mathbf{Q}_{harm}\|}
+$$
+
+Thus $`\alpha = 0`$ keeps $`\mathbf{Q}_{corr}`$, $`\alpha = 1`$ uses entirely the transported direction (discarding the component of $`\mathbf{Q}_{corr}`$ outside the harmonized subspace), and intermediate values perform a normalized interpolation. $`\alpha`$ is **not** a fraction of energy distributed among the search modes: the excitation energy is always set by `-ek` along $`\mathbf{Q}_{final}`$.
+
+Each harmonization appends one row to `subspace_overlap.csv` (replica, cycle, correction index, $`m`$, $`M`$, active and search modes, $`\Omega`$, singular values, principal angles, $`\alpha`$) and the matching coefficients to `subspace_matching_coefficients.csv`. The successive archived vectors (`cntrl_vector.vec.N`) are the $`N`$-th $`\mathbf{Q}_{final}`$, with vector 1 being the initial $`\mathbf{Q}`$; the angle between successive archived vectors combines the physical correction and the transport and must not be interpreted as the isolated effect of the harmonization.
+
+If the ENM recalculation fails, the physical correction $`\mathbf{Q}_{corr}`$ is kept (no second correction is applied) and archived.
 
 [Back to top ↩](#)
 * ****
@@ -442,20 +510,22 @@ The configuration process is straightforward. Some technical aspects will be cov
 Choosing which normal mode to include in the `pyadmd` calculation is crucial for the expected result. We strongly recommend first calculating the ENM modes (`pyadmd enm`), examining them carefully, and then proceeding with the workflow using the `pyadmd run` command. From an exploratory perspective, the collectivity data derived from ENM calculations can provide insights into the importance or dominance of each normal mode within the system's overall dynamics. However, there are phenomena where a specific mode (or set of modes) is better suited to explain the particular conformational transitions involved.
 
 ## Energy injection
-The excitation time of Adaptive MDeNM is $`0.2~ps`$. This means that every $`0.2~ps`$ the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of $`2~kcal/mol`$ is sufficient to achieve a large exploration of the conformational space ($`10~kcal/mol`$ if Cα-only ENM).
+The excitation cycle length is set by `--cycle-steps` (default: $`50`$ steps; with a $`2~fs`$ timestep, $`0.1~ps`$). This means that every cycle the system receives the additional amount of energy defined by the user. Therefore, when studying large scale motions, it is advised to inject small amounts of energy in order to avoid structural distortions caused by an excessive energy injection. Usually, an excitation energy of $`2~kcal/mol`$ is sufficient to achieve a large exploration of the conformational space ($`10~kcal/mol`$ if Cα-only ENM).
 
 ## Simulation time
 The total simulation time may require a tuning depending on the system size, energy injection and nature of the motion being excited. Considering a large scale global motion, there is a trade-off between the energy injection and the total simulation time. Larger amounts of energy allows a shorter simulation time, however, this may not be advised as discussed above.
 
 ## Excitation direction update
 As described above, the direction is updated after the system has traveled a distance of $`0.5~Å`$ along the excitation vector and its real displacement has a deviation of $`60°`$ with respect to the theoretical one. The update can also be affected by the amount of energy injected, since higher energy values leads to larger motions. In addition, after each correction the new vector loses directionality due to anharmonic effects. This means that, at a given point, the new vectors are so diffuse that there is no point in proceed the simulation. When this ponit is reached, it is necessary to recompute the normal modes and start again. This is one more reason to not inject high energy values and let the system undergoes the changes slowly.
-Alternatively, one can recompute ENM modes instead of change the excitation vector direction (only when the original model type is ENM).
+Alternatively, one can recompute ENM modes instead of change the excitation vector direction (only when the original model type is ENM), either with a new random mode combination (`--recalc-method random`, default) or by transporting the corrected direction through a harmonized mode subspace (`--recalc-method harmonized`; see [ENM Recalculation and Subspace Harmonization](#enm-recalculation-and-subspace-harmonization)).
 
 ## Number of modes and replicas
 The program do a linear combination of the supplied normal modes to compute the excitation direction. This imply that the more modes are provided, the more replicas will be necessary to cover the hyperspace described by these modes.
 
 ## Atom selection
 Create an atom selection to apply the energy injection using *[MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html)*. Must be written between quotes. This same selection (`-sel`/`--selection` at `run` time) is later reused by `pyadmd analyze` as the default scope for most structural metrics — see [Analysis Selection Scope](#analysis-selection-scope).
+
+The excitation, the direction correction and the ENM-recalculation subspace operate on the ENM representative atoms **within** this selection: for `-m CA`, the Cα atoms of protein residues and the P, C1′ and C2 beads of nucleic acid residues; for `-m HEAVY`, all non-hydrogen atoms. With `--recalc`, every excitation atom must be protein or nucleic acid.
 
 # Input Requirements
 
@@ -475,7 +545,17 @@ Create an atom selection to apply the energy injection using *[MDAnalysis select
 
 - **`-rep`/`--replicas`**: Number of replicas to run (**optional**. Default: **`10`**)
 
-- **`-seed`/`--seed`**: Random seed for the uniform mode-combination generation (the repulsion-algorithm initialization described in [Uniform Normal Modes Combination](#uniform-normal-modes-combination)) (**optional**. Default: **`42`**). Fixing this value makes `run` more reproducible: identical CLI arguments always produce identical excitation vectors and `factors.csv`. Pass a different value to obtain an independent replicate ensemble. Does **not** affect the `--recalc` mid-simulation re-excitation, which remains stochastic by design — see [Excitation Direction Update](#excitation-direction-update). **Note:** fixing the random seed will create the same start conditions to `run`, but the simulation will diverge after a given point due to stochasticity and floating point precision.
+- **`-seed`/`--seed`**: Random seed for the uniform mode-combination generation (the repulsion-algorithm initialization described in [Uniform Normal Modes Combination](#uniform-normal-modes-combination)) (**optional**. Default: **`42`**). Fixing this value makes `run` more reproducible: identical CLI arguments always produce identical excitation vectors and `factors.csv`. Pass a different value to obtain an independent replicate ensemble. Does **not** affect the `--recalc-method random` mid-simulation re-excitation, which remains stochastic by design — see [Excitation Direction Update](#excitation-direction-update). **Note:** fixing the random seed will create the same start conditions to `run`, but the simulation will diverge after a given point due to stochasticity and floating point precision.
+
+- **`--cycle-steps`**: MD steps per adaptive/constant excitation cycle (**optional**. Default: **`50`**; with a 2 fs timestep, 50 steps = 0.1 ps). Ignored with `--no-correc`, which is fixed at 1000 steps.
+
+- **`--nh-frequency`**: Nosé-Hoover thermostat coupling frequency, in ps⁻¹ (**optional**. Default: **`1.0`**)
+
+- **`--recalc-method`**: Excitation direction update after each ENM recalculation, **`random`** or **`harmonized`** (**optional**. Default: **`random`**). Only meaningful with `-r/--recalc`; `harmonized` requires it. See [ENM Recalculation and Subspace Harmonization](#enm-recalculation-and-subspace-harmonization).
+
+- **`--subspace-search-modes`**: Comma-separated ENM modes defining the larger search subspace $`M`$ for `--recalc-method harmonized`, *e.g.* `7,8,9,10,11,12` (**optional**. Default: same modes as `-nm`). Must contain every mode given in `-nm`. The parser rejects $`M < m`$, duplicates and missing active modes before the simulation starts.
+
+- **`--subspace-alpha`**: Mixing factor $`\alpha \in [0, 1]`$ between the physical correction $`\mathbf{Q}_{corr}`$ and the transported direction $`\mathbf{Q}_{harm}`$ for `--recalc-method harmonized` (**optional**. Default: **`1.0`**).
 
 ### Files
 `pyadmd run` automatically creates the `inputs/` directory in the current
@@ -502,11 +582,21 @@ below into it.
 
 - **`-f`/`--fixed`**: Disable excitation vector correction and keep constant excitation energy injections
 
-- **`-r`/`--recalc`**: Recompute ENM modes instead of correcting the excitation vector direction. **Note:** the new mode combination generated after each recomputation is drawn from a fresh random unit vector and is not controlled by `-seed`/`--seed` — see [Excitation Direction Update](#excitation-direction-update).
+- **`-r`/`--recalc`**: Recompute ENM modes instead of correcting the excitation vector direction. The update that follows the recalculation is selected by `--recalc-method`: with `random` (default) the new mode combination is drawn from a fresh random unit vector and is not controlled by `-seed`/`--seed` — see [Excitation Direction Update](#excitation-direction-update); with `harmonized` the recalculation follows a true angular correction and the corrected direction is transported through the harmonized subspace — see [ENM Recalculation and Subspace Harmonization](#enm-recalculation-and-subspace-harmonization). Not compatible with `-m CHARMM`.
 
 - **`--full-ener`**: Write per-term energy decomposition (BOND, ANGLE, DIHED, IMPRP, CMAP, UBREY, NBFIX, NONBONDED, etc.) to `rep{N}_ener_decomp.log` every cycle
 
-- **`--rtb`**: Use RTB (Rotations-Translations of Blocks) reduction for ENM diagonalization instead of direct full-Hessian diagonalization — see [Rotations-Translations of Blocks (RTB)](#rotations-translations-of-blocks-rtb). Blocks are fixed at one residue each. Only valid with `-m CA` or `-m HEAVY` (not `CHARMM`). Also applies to any `--recalc` ENM recomputation mid-run.
+- **`--rtb`**: Use RTB (Rotations-Translations of Blocks) reduction for ENM diagonalization instead of direct full-Hessian diagonalization — see [Rotations-Translations of Blocks (RTB)](#rotations-translations-of-blocks-rtb). Blocks are fixed at one residue each. Only valid with `-m CA` or `-m HEAVY` (not `CHARMM`). Also applies to any `--recalc` ENM recomputation mid-run, with either `--recalc-method`.
+
+### Run Output Files
+Besides the trajectory, logs and projection files described in [Analysis](#analysis-1), each replica folder may contain the excitation-vector archives and ENM-recalculation diagnostics below.
+
+- **`cntrl_vector.vec`/`excitation.vel`**: current excitation direction $`\mathbf{Q}`$ and excitation velocity (full-system arrays).
+- **`cntrl_vector.vec.N`/`excitation.vel.N`**: archived vectors. With `--recalc-method harmonized`, index $`N`$ is the $`N`$-th $`\mathbf{Q}_{final}`$ (vector 1 being the initial $`\mathbf{Q}`$); otherwise, $`N`$ is the vector in use before the $`N`$-th correction.
+- **`step_{cycle}.pdb`** and **`step_{cycle}_enm/`** (`--recalc`): structure at which each ENM recalculation was performed and its ENM output (mode vectors and trajectories).
+- **`recalc_factors_{N}.csv`** (`--recalc-method random`, inside `step_{cycle}_enm/`): random combination factors of the $`N`$-th recombination.
+- **`subspace_overlap.csv`** (`harmonized`): one row per harmonization — replica, cycle, correction index, $`m`$, $`M`$, active and search modes, $`\Omega`$, singular values $`\sigma_i`$, principal angles (degrees), $`\alpha`$.
+- **`subspace_matching_coefficients.csv`** (`harmonized`): coefficients of each of the $`M`$ search modes in each of the $`m`$ matched directions (entries of $`\mathbf{R}_m`$).
 
 ## Append
 ### Parameters
@@ -820,7 +910,7 @@ Furthermore, some basic analyses are written inside each replica folder at the e
 - **coor-proj.out:** projection of the MD coordinates onto the normal mode space described by the excitation vector
 - **rms-proj.out:** the system RMSD displacement along the excitation vectors
 - **vp-proj.out:** projection of the MD velocities onto the normal mode space described by the excitation vector
-- **ek-proj.out:** displays the additional kinetic energy at each MD step
+- **ek-proj.out:** displays the additional kinetic energy at each MD step, before any re-injection
 
 [Back to top ↩](#)
 * ****
@@ -864,6 +954,20 @@ pyadmd run -src NAMD \
                      -m CHARMM \
                      -mod tutorial/system.mod \
                      --no-correc
+```
+## Using ENM recalculation with harmonized subspace transport
+```
+pyadmd run -src OPENMM \
+                     -psf tutorial/system.psf \
+                     -rst tutorial/system.rst \
+                     -pdb tutorial/system.pdb \
+                     -m CA \
+                     -nm 7,8,9 \
+                     -ek 1 \
+                     -r \
+                     --recalc-method harmonized \
+                     --subspace-search-modes 7,8,9,10,11,12,13,14,15,16 \
+                     --subspace-alpha 0.5
 ```
 ## Restart unfinished pyAdMD simulations
 ```

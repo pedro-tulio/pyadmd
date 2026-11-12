@@ -1,12 +1,67 @@
 """Engine-agnostic system state: SystemState dataclass and reference-state I/O."""
 
+import functools
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import MDAnalysis as mda
 from MDAnalysis.coordinates.memory import MemoryReader
+
+
+# Parsed PSF topologies, keyed by absolute PSF path: {path: (mtime, Topology)}.
+# Parsing a solvated PSF costs ~100 MB of transient and partly retained memory,
+# and ``make_reference_universe`` is called at every ENM recalculation.
+_TOPOLOGY_CACHE: Dict[str, Tuple[float, Any]] = {}
+
+
+def _patch_pdbwriter_cache() -> bool:
+    """
+    Stop MDAnalysis' ``PDBWriter`` from keeping every written Universe alive.
+
+    Recent MDAnalysis releases decorate ``PDBWriter._deduce_PDB_atom_name``
+    with ``functools.cache``. On an instance method this makes the cache key
+    include ``self``, so each writer -- and through it the written AtomGroup
+    and its whole Universe -- is retained for the lifetime of the process.
+    Every PDB write (``AtomGroup.write``) then leaks a Universe: about
+    0.5 MB for a 2,300-atom selection and proportionally more for a full
+    system, several times per ENM recalculation.
+
+    The method only reads class-level constants through ``self``, so it is
+    replaced by an equivalent one whose cache is keyed on the atom and
+    residue names alone. The PDB output is unchanged.
+
+    Returns:
+        bool: True if the patch was applied; False if the installed
+            MDAnalysis does not cache this method (nothing to fix) or its
+            layout differs.
+
+    Note:
+        Applied once, when this module is imported. This module is imported by
+        every component that writes PDB files (ENM, free energy and the
+        simulation runner), so no call site needs to change.
+    """
+    try:
+        from MDAnalysis.coordinates import PDB
+        cached = PDB.PDBWriter.__dict__.get('_deduce_PDB_atom_name')
+        orig = getattr(cached, '__wrapped__', None)
+        if orig is None or not hasattr(cached, 'cache_clear'):
+            return False
+
+        @functools.lru_cache(maxsize=None)
+        def _deduce(atomname, resname):
+            return orig(PDB.PDBWriter, atomname, resname)
+
+        PDB.PDBWriter._deduce_PDB_atom_name = (
+            lambda self, atomname, resname: _deduce(atomname, resname)
+        )
+        return True
+    except Exception:
+        return False
+
+
+_patch_pdbwriter_cache()
 
 
 @dataclass
@@ -31,15 +86,31 @@ def make_reference_universe(psffile: str, positions_ang: np.ndarray) -> mda.Univ
 
     Returns:
         mda.Universe: Universe with ``atoms.positions`` set to ``positions_ang``.
+
+    Note:
+        The PSF is parsed only on the first call for a given file; later calls
+        build the Universe on the already-parsed topology, so no new topology
+        is allocated. The Universes returned therefore share one topology
+        object: they are meant for atom selection, masses, positions and
+        writing, and topology attributes must not be added or modified on
+        them. The cache is refreshed if the PSF file's modification time
+        changes.
     """
     # positions_ang must be shaped (1, N, 3) for MemoryReader (1 frame).
     # This creates a topology-only Universe with a synthetic single-frame
     # trajectory, which makes u.atoms.positions immediately accessible
     # without requiring any on-disk trajectory file.
-    u = mda.Universe(psffile,
-                     positions_ang[np.newaxis, :, :].astype(np.float32),
-                     format=MemoryReader,
-                     n_atoms=positions_ang.shape[0])
+    coords = positions_ang[np.newaxis, :, :].astype(np.float32)
+    n_atoms = positions_ang.shape[0]
+
+    key = os.path.abspath(psffile)
+    mtime = os.path.getmtime(psffile)
+    cached = _TOPOLOGY_CACHE.get(key)
+    if cached is not None and cached[0] == mtime:
+        return mda.Universe(cached[1], coords, format=MemoryReader, n_atoms=n_atoms)
+
+    u = mda.Universe(psffile, coords, format=MemoryReader, n_atoms=n_atoms)
+    _TOPOLOGY_CACHE[key] = (mtime, u._topology)
     return u
 
 
