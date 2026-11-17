@@ -36,12 +36,20 @@ class SimulationRunner:
     """
     Handles running, restarting, and appending aMDeNM simulations.
 
+    This class provides a unified interface for managing simulation runs,
+    including initialization, execution, and cleanup of replica simulations.
+
     Attributes:
         console (ConsoleConfig): Console configuration object for formatted output.
         args (argparse.Namespace): Command line arguments.
         cwd (str): Current working directory.
         input_dir (str): Input directory path.
         psffile (str): PSF topology file path.
+        pdbfile (str): PDB structure file path.
+        coorfile (str): Coordinate file path.
+        velfile (str): Velocity file path.
+        xscfile (str): Extended system configuration file path.
+        strfile (str): Structure file path.
         sys_coor (mda.Universe): System structure universe.
         n_atoms (int): Total number of atoms.
         sys_mass (np.ndarray): System atomic masses.
@@ -157,6 +165,9 @@ class SimulationRunner:
                 str_box = None
 
         if str_box is None:
+            # Derive cell parameters from the initial state's box vectors.
+            # This is the primary path for OpenMM input mode when no .str is given,
+            # and also the fallback for NAMD mode when .str parsing fails.
             a_rot, b_rot, c_rot = self._init_state.box_vectors_nm
             try:
                 str_box = OpenMMRestartReader.box_vectors_to_cell(a_rot, b_rot, c_rot)
@@ -254,7 +265,7 @@ class SimulationRunner:
         """
         Excitation velocity (AKMA) of a control direction.
 
-        Official 3.5.0 scaling in the alpha path; for beta the direction is a
+        Official scaling in the alpha path; for beta the direction is a
         mass-weighted unit vector and the velocity is converted to physical
         units, so that the kinetic energy along it equals ``energy``.
 
@@ -296,6 +307,10 @@ class SimulationRunner:
     def _get_subspace_search_modes(self, nm_parsed: List[int]) -> List[int]:
         """
         Return the larger ENM search space M used for subspace tracking.
+
+        ``-nm/--modes`` defines the active subspace m. The optional
+        ``--subspace-search-modes`` defines the search space M ⊇ m; when
+        absent, M = m.
 
         Args:
             nm_parsed (list[int]): Active mode numbers (dimension m).
@@ -897,14 +912,19 @@ class SimulationRunner:
             print(f"{self.console.PGM_NAM}{now} {self.console.EXT}Replica {rep}{self.console.STD}: running "
                   f"{self.console.EXT}step {self.console.WRN}{loop}{self.console.STD}/{self.console.EXT}{end_loop}{self.console.STD}...")
 
-            if loop % 100 == 0:
-
+            # RUN MD CYCLE
             pos_nm, vel_nm_ps, box_nm = engine.run_cycle(self.args.n_steps, rep=rep, loop=loop)
 
             self._prev_pos_nm = self._curr_pos_nm.copy()
             self._curr_pos_nm = pos_nm
 
             # DIRECTION CORRECTION CHECK
+            # The rms_check measures how far the system has moved along Q since the
+            # last correction reference.  When it reaches qrms_correc, _correct_excitation_direction
+            # is called, which unconditionally advances the reference window and
+            # conditionally replaces Q (only when motion has diverged > 60° from Q).
+            # qrms_correc is incremented here (outer gate) so the window keeps growing
+            # even in cycles where the angle test does not trigger a replacement.
             if not self.args.no_correc and not self.args.fixed:
                 curr_sel  = self._curr_pos_nm[sel_ix]       * 10.0  # nm to Å
                 ref_sel   = self._correc_ref_pos_nm[sel_ix]  * 10.0
@@ -1107,18 +1127,23 @@ class SimulationRunner:
         """
         Track U_m inside V_M, harmonize it, and transport Q_corr.
 
-        U_m frame correction: the transported direction and the harmonized
-        basis come back in the frame of the stored reference. They are rotated
-        into the current MD frame before being stored, so that the basis and
-        its reference positions always share one frame.
+        Reads the recomputed search modes V_M, calls ``harmonize_and_transport``
+        (Kabsch alignment, SVD of the overlap S = U_m^T V_M, Procrustes
+        harmonization, projection of Q_corr onto V_harm, α-mixing), updates the
+        in-memory excitation state, archives Q_final, promotes V_harm to the new
+        active subspace, and appends the diagnostics ``subspace_overlap.csv`` and
+        ``subspace_matching_coefficients.csv``.
+
+        Reached only after a true angular correction, so the current
+        ``self._cntrl_vec`` is Q_corr.
 
         Args:
-            rep (int): Replica number (diagnostics only).
+            rep (int): Replica number (logging/diagnostics only).
             loop (int): Current cycle number.
             nm_parsed (list[int]): Active mode numbers (dimension m).
-            search_modes (list[int]): Search-space mode numbers (dimension M >= m).
-            cnt (int): Correction counter (already incremented).
-            base_name (str): Base name of the ENM run holding the V_M files.
+            search_modes (list[int]): Search-space mode numbers (dimension M ≥ m).
+            cnt (int): Correction counter (already incremented for this correction).
+            base_name (str): Base name of the ENM run holding the V_M mode files.
             sel_ix (np.ndarray): System indices of the excitation atoms.
             sel_masses (np.ndarray): Masses of the excitation atoms (amu).
 
@@ -1131,6 +1156,8 @@ class SimulationRunner:
                                       base_name, sel_ix, sel_masses)
             return
         if self._enm_basis_modes is None or self._enm_basis_ref_pos_nm is None:
+            # Restart compatibility: establish U_m at the current structure
+            # when no persisted basis is available.
             self._initialize_enm_subspace(nm_parsed, sel_ix)
 
         new_modes = self._read_enm_basis(
@@ -1175,12 +1202,16 @@ class SimulationRunner:
         self.mode_exciter._write_vector(q_full, "cntrl_vector.vec", self.sys_coor)
         self.mode_exciter._write_vector(exc_full, "excitation.vel", self.sys_coor)
 
+        # Archive Q_final
         shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
         shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
 
+        # The harmonized m-dimensional subspace becomes U_m for the next
+        # correction; the MD system is unchanged.
         self._enm_basis_modes = result.harmonized_modes.copy()
         self._enm_basis_ref_pos_nm = self._curr_pos_nm.copy()
 
+        # Diagnostics for m -> M subspace tracking
         diag = "subspace_overlap.csv"
         new_file = not os.path.exists(diag)
         with open(diag, "a", newline="") as fh:
@@ -1201,6 +1232,7 @@ class SimulationRunner:
                 alpha
             ])
 
+        # Coefficients of the M search modes in the m matched directions
         coeff_diag = "subspace_matching_coefficients.csv"
         coeff_new_file = not os.path.exists(coeff_diag)
         with open(coeff_diag, "a", newline="") as fh:
@@ -1345,6 +1377,10 @@ class SimulationRunner:
         """
         Recompute ENM modes and update Q, then release the memory used.
 
+        Thin wrapper around ``_recompute_enm_modes_impl`` that brackets the
+        recalculation with the opt-in memory log and returns freed memory to
+        the operating system afterwards (see ``_release_memory``).
+
         Args:
             rep (int): Replica number (logging only).
             loop (int): Current simulation cycle number.
@@ -1360,12 +1396,18 @@ class SimulationRunner:
         """
         Recompute ENM modes from the current structure and update Q.
 
-        Methods, selected by ``--recalc-method``:
-          - ``random`` (3.4.0/3.5.0 behavior): recompute the active modes and
-            draw a new random combination.
-          - ``harmonized``: recompute the search space M >= m and transport
-            Q_corr through the harmonized subspace. With beta > 0 the reservoir
-            spectrum is written instead, and the beta update is applied.
+        Two methods, selected by ``--recalc-method``:
+
+          - ``random`` (default, 3.4.0 behavior): recompute the active modes
+            and draw a new random unit-vector combination of them
+            (``_generate_new_excitation_vector``).
+          - ``harmonized``: recompute the search space M ⊇ m and transport
+            Q_corr through the harmonized subspace
+            (``_transport_q_through_enm_subspace``).
+
+        Both honor ``--rtb`` in the ENM diagonalization. The structure used is
+        saved by ``ENMCalculator.compute_enm`` in
+        ``step_{loop}_enm/step_{loop}.pdb``.
 
         Args:
             rep (int): Replica number (logging only).
@@ -1376,6 +1418,11 @@ class SimulationRunner:
         Raises:
             RuntimeError: In beta mode, if the ENM update fails (the reservoir
                 is never discarded silently).
+
+        Note:
+            On failure the ``random`` method falls back to the standard
+            direction correction; the ``harmonized`` method keeps Q_corr
+            (already computed by the caller) and archives it.
         """
         console = ConsoleConfig()
         now = time.strftime("%H:%M:%S")
@@ -1396,6 +1443,8 @@ class SimulationRunner:
                   f"recomputing ENM modes at step {console.EXT}{loop}{console.STD} "
                   f"[method=random; active modes={nm_parsed}]...")
 
+        # compute_enm saves the structure it uses (protein/nucleic atoms) as
+        # step_{loop}_enm/step_{loop}.pdb; no separate full-system PDB is written.
         current_pos_ang = self._curr_pos_nm * 10.0   # nm to Å
         enm_calc = ENMCalculator(self.console)
         base_name = f"step_{loop}"
@@ -1449,6 +1498,7 @@ class SimulationRunner:
                     if os.path.exists(src):
                         shutil.copy(src, f"{src}.{cnt}")
             else:
+                # Fall back to standard direction correction
                 _sel_fb = self._enm_selection_atoms()
                 self._correct_excitation_direction(
                     rep, loop, self._cntrl_vec, cnt,
@@ -1472,6 +1522,11 @@ class SimulationRunner:
         Raises:
             FileNotFoundError: If a mode file is missing.
             RuntimeError: If the combined vector has zero norm.
+
+        Note:
+            The combined vector is built from the *written mode vector files*,
+            which are already in full Cartesian space whether or not the ENM
+            used RTB (see ``ENMCalculator.compute_enm``).
         """
         console = ConsoleConfig()
         print(f"{console.PGM_NAM}Generating new random factors for ENM recombination.")

@@ -1244,9 +1244,7 @@ by `pip install`. Requires Python ≥ 3.12. Core dependencies:
   - `numba>=0.61.2`
   - `biopython`
   - `cupy-cuda12x>=13.6` (GPU-accelerated ENM diagonalization)
-
-External system dependency (must be installed separately):
-  - `dssp` (>=4.2.2), required for secondary structure analysis. Refer to the *[DSSP official GitHub repository](https://github.com/PDB-REDO/dssp?tab=readme-ov-file#building)* for building details.
+  - `rs-dssp>=0.2.1`
 
 [Back to top ↩](#)
 * ****

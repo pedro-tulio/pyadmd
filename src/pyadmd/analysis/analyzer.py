@@ -5,7 +5,6 @@ import json
 import multiprocessing as mp
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import time
@@ -24,6 +23,7 @@ from scipy.interpolate import RegularGridInterpolator
 
 import MDAnalysis as mda
 from MDAnalysis.analysis import align
+import rs_dssp
 from Bio.PDB import PDBParser, ShrakeRupley
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
 
@@ -1436,159 +1436,87 @@ class Analyzer:
             sum_matrix = sum_matrix + new_matrix
         return sum_matrix, count + 1
 
+    # rs-dssp C8 code -> the five categories used throughout the analyzer.
+    # S (bend) and P (PPII) fall into 'other', as they did with legacy DSSP.
+    _SS_CATEGORY: Dict[str, str] = {
+        'H': 'helix', 'G': 'helix', 'I': 'helix',
+        'E': 'sheet', 'B': 'sheet',
+        'T': 'turn',
+        ' ': 'coil',
+    }
+
+    _BACKBONE_ATOM_NAMES = ('N', 'CA', 'C', 'O')
+
+    def _extract_backbone(self, protein: mda.AtomGroup) -> Optional[np.ndarray]:
+        """
+        Extract the N, CA, C, O backbone coordinates of every residue that has
+        a complete set of all four atoms, in residue order.
+
+        Args:
+            protein (mda.AtomGroup): Protein atom selection for the current frame.
+
+        Returns:
+            np.ndarray or None: Shape (L, 4, 3), float64, in Å, ready for
+                ``rs_dssp.assign_from_coords``. None if no residue has a
+                complete backbone.
+        """
+        blocks = []
+        for residue in protein.residues:
+            positions = {}
+            for atom in residue.atoms:
+                if atom.name in self._BACKBONE_ATOM_NAMES and atom.name not in positions:
+                    positions[atom.name] = atom.position
+            if len(positions) == len(self._BACKBONE_ATOM_NAMES):
+                blocks.append([positions[name] for name in self._BACKBONE_ATOM_NAMES])
+        if not blocks:
+            return None
+        return np.asarray(blocks, dtype=np.float64)
+
     def _calc_ss(self, protein: mda.AtomGroup, rep_num: int, frame_idx: int) -> Dict[str, int]:
         """
-        Calculates secondary structure content using DSSP.
+        Calculates secondary structure content using rs-dssp.
+
+        Backbone coordinates are passed to ``rs_dssp.assign_from_coords``
+        in memory (no temporary PDB file). SASA is disabled in that call
+        because it is computed separately by ``_calc_sasa_metrics``.
 
         Args:
             protein (mda.AtomGroup): Pre-built protein atom selection,
                 built once by the caller before its frame loop and reused
                 across every frame.
-            rep_num (int): Replica number identifier
-            frame_idx (int): Frame index number
+            rep_num (int): Replica number identifier (used in warnings).
+            frame_idx (int): Frame index number (used in warnings).
 
         Returns:
-            dict: Dictionary with secondary structure counts
+            dict: Residue counts for 'helix', 'sheet', 'coil', 'turn', 'other'.
+                All zeros if the calculation fails.
         """
+        empty = {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
         try:
             if len(protein) == 0:
                 print(f"{self.console.PGM_WRN}No protein atoms found for secondary structure analysis.")
-                return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
+                return dict(empty)
 
-            # Create temporary PDB file
-            with tempfile.NamedTemporaryFile(suffix='.pdb', delete=False, mode='w') as temp_pdb:
-                pdb_path = temp_pdb.name
+            coords = self._extract_backbone(protein)
+            if coords is None:
+                print(f"{self.console.PGM_WRN}No complete N/CA/C/O backbone found for "
+                      f"{self.console.WRN}{self.unit_label.lower()} {rep_num}{self.console.STD}, "
+                      f"frame {self.console.WRN}{frame_idx}{self.console.STD}; skipping DSSP.")
+                return dict(empty)
 
-                # Write a dummy header to avoid DSSP error
-                temp_pdb.write(f"HEADER     MDANALYSIS FRAME {frame_idx}: Created by PDBWriter\n")
-                temp_pdb.write("CRYST1    1.000    1.000    1.000  90.00  90.00  90.00 P 1           1\n")
+            # rs-dssp's Rust binding takes a C-contiguous float32 array;
+            # passing float64 raises "cannot be converted to PyArray".
+            coords = np.ascontiguousarray(coords, dtype=np.float32)
+            result = rs_dssp.assign_from_coords(coords, calculate_sasa=False)
 
-                # Write protein atoms to the PDB file
-                for i, atom in enumerate(protein.atoms):
-                    # Format atom record according to PDB specification
-                    record = "ATOM  "
-                    serial = str(i+1).rjust(5)
-                    name = atom.name.ljust(4)
-                    alt_loc = " "
-                    res_name = atom.resname.ljust(3)
-                    chain_id = "A"
-                    res_seq = str(atom.resid).rjust(4)
-                    i_code = " "
-                    x = "{:8.3f}".format(atom.position[0])
-                    y = "{:8.3f}".format(atom.position[1])
-                    z = "{:8.3f}".format(atom.position[2])
-                    occupancy = "  1.00"
-                    temp_factor = "  0.00"
-                    element = atom.element.rjust(2) if hasattr(atom, 'element') else "  "
-                    charge = "  "
-
-                    atom_line = f"{record}{serial} {name}{alt_loc}{res_name} {chain_id}{res_seq}{i_code}   {x}{y}{z}{occupancy}{temp_factor}          {element}{charge}\n"
-                    temp_pdb.write(atom_line)
-
-                # Add TER record at the end
-                temp_pdb.write("TER\n")
-
-            # Use DSSP command directly
-            try:
-                # Create temporary DSSP output file
-                with tempfile.NamedTemporaryFile(suffix='.dssp', delete=False) as temp_dssp:
-                    dssp_path = temp_dssp.name
-
-                # Run DSSP command
-                cmd = f"dssp --output-format dssp {pdb_path} {dssp_path}"
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-
-                # Clean up PDB file
-                os.unlink(pdb_path)
-
-                if result.returncode != 0:
-                    print(f"{self.console.PGM_WRN}DSSP command failed: {result.stderr}")
-                    # Clean up DSSP file
-                    os.unlink(dssp_path)
-                    return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
-
-                # Parse DSSP output
-                ss_data = self._parse_dssp_output(dssp_path)
-
-                # Clean up DSSP file
-                os.unlink(dssp_path)
-
-                return ss_data
-
-            except Exception as dssp_error:
-                print(f"{self.console.PGM_WRN}DSSP calculation failed: {dssp_error}")
-                # Clean up files if they exist
-                if os.path.exists(pdb_path):
-                    os.unlink(pdb_path)
-                if os.path.exists(dssp_path):
-                    os.unlink(dssp_path)
-                return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
-
-        except Exception as e:
-            print(f"{self.console.PGM_WRN}Could not calculate secondary structure: {self.console.WRN}{e}{self.console.STD}")
-            return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
-
-    def _parse_dssp_output(self, dssp_path: str) -> Dict[str, int]:
-        """
-        Parses DSSP output file and counts secondary structure types.
-
-        Args:
-            dssp_path (str): Path to DSSP output file
-
-        Returns:
-            dict: Dictionary with secondary structure counts
-        """
-        ss_data = {
-            'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0
-        }
-
-        try:
-            with open(dssp_path, 'r') as f:
-                lines = f.readlines()
-
-            # DSSP format: secondary structure assignment is at position 16 (0-based index)
-            # Skip header lines (look for the line that starts with "  #")
-            start_parsing = False
-            processed_residues = set()
-
-            for line in lines:
-                if line.startswith("  #"):
-                    start_parsing = True
-                    continue
-
-                if start_parsing and len(line) > 16:
-                    # Extract residue identifier to avoid double-counting
-                    residue_id = line[5:10].strip()  # Residue number
-                    chain_id = line[10:12].strip()   # Chain identifier
-                    unique_id = f"{chain_id}_{residue_id}"
-
-                    # Skip if we've already processed this residue
-                    if unique_id in processed_residues:
-                        continue
-
-                    processed_residues.add(unique_id)
-
-                    ss_type = line[16]
-
-                    # DSSP codes: H=α-helix, G=3(10)-helix, I=π-helix to helix
-                    #             E=β-strand, B=β-bridge to sheet
-                    #             T=hydrogen-bonded turn, ' '=random coil
-                    if ss_type in ['H', 'G', 'I']:
-                        ss_data['helix'] += 1
-                    elif ss_type in ['E', 'B']:
-                        ss_data['sheet'] += 1
-                    elif ss_type == 'T':
-                        ss_data['turn'] += 1
-                    elif ss_type == ' ':
-                        ss_data['coil'] += 1
-                    else:
-                        ss_data['other'] += 1
-
+            ss_data = dict(empty)
+            for residue in result.residues:
+                ss_data[self._SS_CATEGORY.get(residue.structure, 'other')] += 1
             return ss_data
 
         except Exception as e:
-            print(f"{self.console.PGM_WRN}Could not parse DSSP output: {self.console.WRN}{e}{self.console.STD}")
-            return {'helix': 0, 'sheet': 0, 'coil': 0, 'turn': 0, 'other': 0}
+            print(f"{self.console.PGM_WRN}Could not calculate secondary structure: {self.console.WRN}{e}{self.console.STD}")
+            return dict(empty)
 
     def _plot_ss_rep(self, df: pd.DataFrame, sim_time: int, rep_analysis_dir: str, rep_num: int) -> None:
         """
@@ -1611,7 +1539,7 @@ class Analyzer:
                          df['turn'],
                          df['other'],
                          labels=['Helix', 'Sheet', 'Coil', 'Turn', 'Other'],
-                         alpha=0.8)
+                         alpha=1.0, edgecolor='none', linewidth=0)
 
             plt.xlabel('Time (ps)')
             plt.ylabel('Number of Residues')
@@ -2003,7 +1931,7 @@ class Analyzer:
                          avg_data['turn'],
                          avg_data['other'],
                          labels=['Helix', 'Sheet', 'Coil', 'Turn', 'Other'],
-                         alpha=0.8)
+                         alpha=1.0, edgecolor='none', linewidth=0)
 
             plt.xlabel('Time (ps)')
             plt.ylabel('Number of Residues')

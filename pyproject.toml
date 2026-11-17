@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyadmd"
-version = "3.6.0"
+version = "3.6.1"
 description = "Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM) on OpenMM."
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -38,6 +38,7 @@ dependencies = [
     "numba>=0.61.2",
     "biopython",
     "cupy-cuda12x>=13.6",
+    "rs-dssp>=0.2.1",
 ]
 
 [project.scripts]
