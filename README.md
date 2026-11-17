@@ -49,6 +49,16 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
     - [Overlap Matrix and SVD](#overlap-matrix-and-svd)
     - [Procrustes Harmonization](#procrustes-harmonization)
     - [Transport of *Q* and Controlled Mixing](#transport-of-q-and-controlled-mixing)
+  - [Optional Transverse Diversification with Beta](#optional-transverse-diversification-with-beta)
+    - [Purpose and relationship to alpha](#purpose-and-relationship-to-alpha)
+    - [Coordinates and alpha-corrected direction](#coordinates-and-alpha-corrected-direction)
+    - [Harmonizing the full reservoir](#harmonizing-the-full-reservoir)
+    - [Effective stiffness and transverse score](#effective-stiffness-and-transverse-score)
+    - [Exclusion, selection, and sign continuity](#exclusion-selection-and-sign-continuity)
+    - [Final mixture and excitation energy](#final-mixture-and-excitation-energy)
+    - [Activation, constraints, and diagnostics](#activation-constraints-and-diagnostics)
+    - [Restart and state](#restart-and-state)
+    - [Invalid mode-count configurations](#invalid-mode-count-configurations)
 - [pyAdMD Applications](#pyadmd-applications)
   - [ENM](#enm)
   - [Physical force-field based normal modes](#physical-force-field-based-normal-modes)
@@ -102,6 +112,7 @@ The **Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM)** method ap
   - [Using NAMD inputs and Cα NMs with custom parameters](#using-namd-inputs-and-cα-nms-with-custom-parameters)
   - [Using NAMD inputs and CHARMM NMs without direction correction (standard MDeNM)](#using-namd-inputs-and-charmm-nms-without-direction-correction-standard-mdenm)
   - [Using ENM recalculation with harmonized subspace transport](#using-enm-recalculation-with-harmonized-subspace-transport)
+  - [Using alpha harmonization with beta diversification](#using-alpha-harmonization-with-beta-diversification)
   - [Restart unfinished pyAdMD simulations](#restart-unfinished-pyadmd-simulations)
   - [Append 100 ps to previously finished pyAdMD simulations](#append-100-ps-to-previously-finished-pyadmd-simulations)
   - [Analyze pyAdMD simulations (all frames)](#analyze-pyadmd-simulations-all-frames)
@@ -491,6 +502,147 @@ If the ENM recalculation fails, the physical correction $`\mathbf{Q}_{corr}`$ is
 [Back to top ↩](#)
 * ****
 
+## Optional Transverse Diversification with Beta
+
+### Purpose and relationship to alpha
+
+The active subspace contains a small number of collective directions, whereas the larger search reservoir allows those directions to be tracked when newly computed modes change order, sign, or composition. Alpha controls transport toward the tracked active subspace. Beta optionally adds a configurable number of directions selected from a separately harmonized full reservoir. These directions favor motion transverse to the alpha-corrected excitation while penalizing high stiffness. This can alter the explored path; it does not by itself guarantee wider sampling or smaller excursions.
+
+Let $m$ be the number of distinct active modes given to `-nm`, $B$ the positive integer given to `--subspace-beta-count` (default 3), and $M$ the number of distinct search modes. Positive beta requires $M\ge m+B$, with every active mode in the reservoir. The reservoir is limited by the available ENM spectrum. All contributions form **one normalized excitation direction**. A harmonized reservoir direction is generally a combination of several instantaneous ENM eigenvectors, so its persistent label need not correspond to the instantaneous eigenmode with the same number.
+
+### Coordinates and alpha-corrected direction
+
+All vectors below are columns in the same mass-weighted coordinate system and rigid-body frame. Let $N$ be the number of excitation atoms and $M$ the number of search modes. Unit vectors have Euclidean norm one in this mass-weighted space. The new coordinates and vectors are first rotated into the old reference frame using mass-weighted Kabsch alignment. The resulting direction and both stored bases are then rotated back into the current MD frame, so the stored basis and its reference positions share one frame.
+
+Let $H\in\mathbb{R}^{3N\times m}$ be the orthonormal harmonized active basis obtained by the rectangular Procrustes procedure described above, and let $q$ be the normalized direction after the displacement-based correction. Define
+
+$$
+p=HH^\top q,\qquad q_h=\frac{p}{\|p\|},\qquad
+q_c=\frac{(1-\alpha)q+\alpha q_h}{\|(1-\alpha)q+\alpha q_h\|}.
+$$
+
+Here $HH^\top$ is the orthogonal projector onto the active subspace, $q_h$ is the normalized projection, and $q_c$ is the alpha-corrected direction entering the beta step. A numerically vanishing projection is rejected. The subscript $c$ in this section denotes the result **after alpha mixing**, not the preceding displacement correction alone.
+
+### Harmonizing the full reservoir
+
+Let $E\in\mathbb{R}^{3N\times M}$ contain the newly calculated search vectors after alignment. Write its reduced QR factorization as $E=VT$, where $V^\top V=I_M$ and $T$ is triangular. Let $A$ be an orthonormal basis of the previously stored full reservoir in the same frame. A separate, square Procrustes calculation gives
+
+$$
+A^\top V=L_R\Sigma_R R_R^\top,\qquad
+O=R_RL_R^\top,\qquad W=VO.
+$$
+
+The columns $w_j$ of $W$ form the current orthonormal, continuously oriented reservoir. This full-reservoir alignment is distinct from the rectangular calculation that produces the active basis with $m$ columns $H$. Both bases are stored for the next update. The singular values in $\Sigma_R$ measure reservoir continuity.
+
+To express these transported directions in the original new-mode coordinates, define
+
+$$
+C=T^{-1}O,\qquad W=EC.
+$$
+
+This triangular transformation matters when the input basis requires orthonormalization: stiffness must be transformed consistently with the vectors.
+
+### Effective stiffness and transverse score
+
+Let $D$ be the mass-weighted ENM Hessian, and let $K=E^\top D E$ be its representation in the new search basis. For exact orthonormal eigenvectors, $K$ is diagonal with their eigenvalues. The implementation retains the full matrix, including couplings where applicable. In the transported reservoir,
+
+$$
+G=C^\top K C,\qquad \kappa_j=G_{jj},\qquad
+\lambda_{ref}=\lambda_{min}(K).
+$$
+
+Thus $\kappa_j$ is the effective stiffness of the whole transported direction $w_j$. The reservoir is rejected if its stiffness matrix is non-finite, non-symmetric, unstable, or nearly singular; the numerical positive-definiteness condition is $\lambda_{min}(K)>10^{-8}\lambda_{max}(K)>0$.
+
+For each candidate, compute
+
+$$
+p_j=w_j^\top q_c,\qquad
+d_j=\sqrt{\max(0,1-p_j^2)},\qquad
+s_j=d_j\sqrt{\frac{\lambda_{ref}}{\kappa_j}}.
+$$
+
+Because $w_j$ and $q_c$ are normalized, $p_j$ is their cosine, and $d_j$ measures their transverse separation. Numerically, the cosine is clipped to $[-1,1]$. The stiffness factor favors softer directions, so a direction can score highly through both transverse orientation and low stiffness. Transversality is used for **selection**; the implementation does not replace $w_j$ with a normalized orthogonal residual.
+
+### Exclusion, selection, and sign continuity
+
+First measure overlap with the active space:
+
+$$
+a_j=\|H^\top w_j\|^2=\sum_{i=1}^{m}(h_i^\top w_j)^2.
+$$
+
+Exclude the $m$ reservoir directions with largest $a_j$. Among the remaining directions, select the $B$ largest scores $s_j$; denote their indices by $J$. Exclusion limits duplication of the active space but does not impose exact orthogonality. Scores that agree to $10^{-12}$ relative precision keep the persistent reservoir ordering. $B$ candidates with scores above $10^{-12}$ are required. With exactly $M=m+B$ search modes, every remaining candidate must qualify; a larger reservoir lets the score choose among alternatives.
+
+For the selected directions, define equal-magnitude coefficients
+
+$$
+b_j=\frac{\epsilon_j}{\sqrt{B}},\qquad
+\epsilon_j=\begin{cases}-1,&p_j<-10^{-12},\\+1,&p_j\geq-10^{-12},\end{cases}
+\qquad S=\sum_{j\in J}b_jw_j.
+$$
+
+Away from numerical zero, the signs make each selected contribution point toward the same hemisphere as $q_c$. Near-zero projections retain the transported sign rather than introducing an arbitrary reversal. Since the selected reservoir vectors are orthonormal, $\|S\|=1$. The equal magnitudes apply to the $B$ **harmonized directions**, not to all instantaneous modes contained in them.
+
+### Final mixture and excitation energy
+
+The final direction is
+
+$$
+q_{new}=\frac{q_c+\beta S}{\|q_c+\beta S\|}
+=\frac{q_c+\beta S}{\sqrt{1+\beta^2+2\beta q_c^\top S}}.
+$$
+
+Beta sets the relative amplitude of the supplementary combination before normalization. It is neither an energy fraction nor a count-based division of the excitation energy. The code verifies $q_{new}^\top q_c>0$; this local continuity condition does not prevent a later trajectory from returning toward its starting conformation.
+
+For a unit mass-weighted direction, the positive-beta velocity conversion has the form
+
+$$
+v_{exc,i}=\sqrt{2E_{target}}\,\frac{q_{new,i}}{\sqrt{m_i}},\qquad
+\frac12\sum_i m_i\|v_{exc,i}\|^2=E_{target},
+$$
+
+where $m_i$ is an atomic mass and the implementation performs its internal unit conversions. The existing kinetic-energy controller determines when this target is restored. Increasing `-ek` changes the energy target along the combined direction; increasing beta changes its geometry. In a harmonic approximation, a pure-mode displacement amplitude scales as $\sqrt{2E/\lambda}$, which explains why stiffness enters the selection score. It does not prescribe an automatic energy compensation when beta changes.
+
+The supplementary mixture's effective stiffness is
+
+$$
+\kappa_S=b^\top G_{JJ}b
+=\sum_{j\in J}b_j^2G_{jj}+\sum_{j\ne k\in J}b_jb_kG_{jk}.
+$$
+
+The off-diagonal term is retained and reported. Harmonized directions are not generally independent eigenmodes, so their mixture cannot be characterized only by a sum of diagonal eigenvalues.
+
+### Activation, constraints, and diagnostics
+
+Beta is enabled by adding the following options to a `run` command (see [Using alpha harmonization with beta diversification](#using-alpha-harmonization-with-beta-diversification)):
+
+```text
+-r --recalc-method harmonized
+--subspace-search-modes <M labels, including all -nm modes>
+--subspace-alpha <alpha> --subspace-beta <beta> [--subspace-beta-count <B>]
+```
+
+Positive beta requires $0<\beta<\infty$ and $0\leq\alpha\leq1$, at least one active mode, and at least $m+B$ distinct search modes containing all active modes and excluding labels 1–6. The excitation selection must include the entire ENM representative-atom selection. `HEAVY` is also supported. The mode ranges and parameter values in the examples illustrate the syntax; they are not general recommendations.
+
+`--subspace-beta 0` is the default and keeps the alpha transport and velocity-conversion path. Positive beta additionally uses the consistent current-frame transport and the mass-weighted-to-physical velocity conversion. A beta-zero versus positive-beta comparison therefore includes these implementation differences as well as the supplementary mixture.
+
+Beta updates write `subspace_candidates.csv` (candidate scores, overlaps, selections and coefficients), `subspace_diversity.csv` (selection, continuity, stiffness, participation and collectivity summaries) and `subspace_diversity_N.npz` (full matrices and coefficients). The selected labels refer to tracked reservoir directions. `subspace_overlap.csv` is written in both modes.
+
+### Restart and state
+
+Every fresh replica resets the adaptive displacement threshold to 0.5 Å and clears accumulated averages and ENM bases. A restart restores the saved adaptive state instead. The beta restart state includes the active basis, the full reservoir, the reference coordinates and the configuration; the restart verifies these against the saved checksums and checkpoint. Do not change alpha, beta, the beta count, the mode selections or the model of a saved run; start a new run to use different settings.
+
+### Invalid mode-count configurations
+
+For positive beta, the reservoir must contain at least $m+B$ distinct modes, including every active mode and excluding rigid-body modes 1–6. Invalid configurations stop with an error before the simulation starts, and counts are never silently reduced. For example, four active modes with four beta directions require at least eight reservoir modes; seven produces an error stating the required and supplied counts.
+
+During adaptive recomputation, the software also checks that enough meaningful transverse candidates remain. If not, it stops and reports the available and requested counts. A larger reservoir or fewer beta directions should be tested in a fresh run.
+
+Beta may equal or exceed alpha, including values above 1. Alpha remains an interpolation coefficient between 0 and 1. Beta is a relative amplitude, not a percentage or an energy fraction. For example, `--subspace-alpha 0.3 --subspace-beta 0.7` is valid, and no condition $\alpha+\beta\leq1$ is imposed. For $\beta>1$, the equivalent mixture $q_c/\beta+S$ is normalized, which avoids overflow.
+
+[Back to top ↩](#)
+* ****
+
 # pyAdMD Applications
 The Adaptive MDeNM method takes self-computed Cα or heavy atoms ENM modes or CHARMM-computed normal modes as collective variables to improve Molecular Dynamics sampling.
 
@@ -523,7 +675,7 @@ Alternatively, one can recompute ENM modes instead of change the excitation vect
 The program do a linear combination of the supplied normal modes to compute the excitation direction. This imply that the more modes are provided, the more replicas will be necessary to cover the hyperspace described by these modes.
 
 ## Atom selection
-Create an atom selection to apply the energy injection using *[MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html)*. Must be written between quotes. This same selection (`-sel`/`--selection` at `run` time) is later reused by `pyadmd analyze` as the default scope for most structural metrics — see [Analysis Selection Scope](#analysis-selection-scope).
+Create an atom selection to apply the energy injection using *[MDAnalysis selection language](https://userguide.mdanalysis.org/1.1.1/selections.html)*. Must be written between quotes. This same selection (`-sel`/`--selection` at `run` time) is later reused by `pyadmd analyze` as the default scope for most structural metrics.
 
 The excitation, the direction correction and the ENM-recalculation subspace operate on the ENM representative atoms **within** this selection: for `-m CA`, the Cα atoms of protein residues and the P, C1′ and C2 beads of nucleic acid residues; for `-m HEAVY`, all non-hydrogen atoms. With `--recalc`, every excitation atom must be protein or nucleic acid.
 
@@ -541,7 +693,7 @@ The excitation, the direction correction and the ENM-recalculation subspace oper
 
 - **`-t`/`--time`**: Simulation time (**optional**. Default: **`250`** ps)
 
-- **`-sel`/`--selection`**: Atom selection to apply the energy injection (**optional**. Default: **`"protein"`**). Also becomes the default scope for most `pyadmd analyze` structural metrics — see [Analysis Selection Scope](#analysis-selection-scope).
+- **`-sel`/`--selection`**: Atom selection to apply the energy injection (**optional**. Default: **`"protein"`**). Also becomes the default scope for most `pyadmd analyze` structural metrics.
 
 - **`-rep`/`--replicas`**: Number of replicas to run (**optional**. Default: **`10`**)
 
@@ -556,6 +708,10 @@ The excitation, the direction correction and the ENM-recalculation subspace oper
 - **`--subspace-search-modes`**: Comma-separated ENM modes defining the larger search subspace $`M`$ for `--recalc-method harmonized`, *e.g.* `7,8,9,10,11,12` (**optional**. Default: same modes as `-nm`). Must contain every mode given in `-nm`. The parser rejects $`M < m`$, duplicates and missing active modes before the simulation starts.
 
 - **`--subspace-alpha`**: Mixing factor $`\alpha \in [0, 1]`$ between the physical correction $`\mathbf{Q}_{corr}`$ and the transported direction $`\mathbf{Q}_{harm}`$ for `--recalc-method harmonized` (**optional**. Default: **`1.0`**).
+
+- **`--subspace-beta`**: Amplitude of the optional transverse diversification (**optional**. Default: **`0`**, disabled). Positive values require `-r --recalc-method harmonized`, an ENM model (`CA` or `HEAVY`), and a search space that satisfies the count rule in [Activation, constraints, and diagnostics](#activation-constraints-and-diagnostics).
+
+- **`--subspace-beta-count`**: Number of supplementary transverse directions $`B`$ (positive integer; **optional**. Default: **`3`**). It has no effect when `--subspace-beta` is `0`.
 
 ### Files
 `pyadmd run` automatically creates the `inputs/` directory in the current
@@ -596,7 +752,9 @@ Besides the trajectory, logs and projection files described in [Analysis](#analy
 - **`step_{cycle}.pdb`** and **`step_{cycle}_enm/`** (`--recalc`): structure at which each ENM recalculation was performed and its ENM output (mode vectors and trajectories).
 - **`recalc_factors_{N}.csv`** (`--recalc-method random`, inside `step_{cycle}_enm/`): random combination factors of the $`N`$-th recombination.
 - **`subspace_overlap.csv`** (`harmonized`): one row per harmonization — replica, cycle, correction index, $`m`$, $`M`$, active and search modes, $`\Omega`$, singular values $`\sigma_i`$, principal angles (degrees), $`\alpha`$.
-- **`subspace_matching_coefficients.csv`** (`harmonized`): coefficients of each of the $`M`$ search modes in each of the $`m`$ matched directions (entries of $`\mathbf{R}_m`$).
+- **`subspace_matching_coefficients.csv`** (`harmonized`, alpha path): coefficients of each of the $`M`$ search modes in each of the $`m`$ matched directions (entries of $`\mathbf{R}_m`$).
+- **`subspace_candidates.csv`**, **`subspace_diversity.csv`**, **`subspace_diversity_N.npz`** (`--subspace-beta` > 0): per-candidate scores and selections, per-update diversity summaries, and the full arrays of the N-th beta update (see [Optional Transverse Diversification with Beta](#optional-transverse-diversification-with-beta)).
+- **`_state_*.npy`**, **`correction_state.json`**, **`_state_enm_diversity.json`** (beta): the adaptive state required for `restart` and `append`. Do not delete them while a run is unfinished.
 
 ## Append
 ### Parameters
@@ -615,7 +773,7 @@ All parameters are optional; the `fel` subcommand reads its input trajectories a
 - **`-s`/`--sel`**: MDAnalysis selection string used for GROMOS RMSD clustering (**optional**. Default: **`"protein and name CA"`**)
 - **`--max-centroids`**: Maximum number of centroids submitted to MD. When the cluster count exceeds this value, exactly this many centroids are selected by greedy farthest-point (MaxMin) sampling to maximize conformational diversity (**optional**. Default: **`50`**)
 
-**Note:** `-s`/`--sel` and `-T`/`--temp` must stay the same across repeated `fel` calls on the same simulation — see [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation). This `-s`/`--sel` selection is independent of `run`'s `-sel`/`--selection`: it controls GROMOS clustering only, while `run`'s selection controls both energy injection and (by default) the scope of most `pyadmd analyze` metrics — see [Analysis Selection Scope](#analysis-selection-scope).
+**Note:** `-s`/`--sel` and `-T`/`--temp` must stay the same across repeated `fel` calls on the same simulation — see [Extending a Previous Free Energy Calculation](#extending-a-previous-free-energy-calculation). This `-s`/`--sel` selection is independent of `run`'s `-sel`/`--selection`: it controls GROMOS clustering only, while `run`'s selection controls both energy injection and (by default) the scope of most `pyadmd analyze` metrics.
 
 ## Analysis
 ### Parameters
@@ -747,7 +905,7 @@ The **`fel`** subcommand computes a free energy landscape (FEL) from a completed
 ### Directory Organization
 ```
 fel/
-├── run_metadata.json                       # parameters used (gates append behavior)
+├── run_metadata.json                       # parameters used (controls append behavior)
 ├── clustering_rmsd_cache.npz               # cached pairwise-RMSD matrix (reused across calls)
 ├── clustering_rmsd_cache.json              # cache validity metadata (selection, frame count, stride)
 ├── clustering_summary.csv                  # per-cluster frame index, size, and production status
@@ -841,7 +999,7 @@ The analysis module reads simulation parameters from the `pyAdMD_params.json` fi
 
 - Number of replicas
 - Total simulation time
-- Atom selection criteria (used to scope RMSD/RoG/SASA/hydrophobic-exposure/DSSP — see [Analysis Selection Scope](#analysis-selection-scope))
+- Atom selection criteria (used to scope RMSD/RoG/SASA/hydrophobic-exposure/DSSP
 - Input file paths
 
 When `-src fel` is used, the shared production time axis (applied uniformly across all centroids) is instead read from `fel/run_metadata.json`'s `production_ps` value; `pyAdMD_params.json` is still used to locate the shared PSF topology file and the analysis selection.
@@ -916,7 +1074,7 @@ Furthermore, some basic analyses are written inside each replica folder at the e
 * ****
 
 # Usage Examples
-Example files are available at the **[tutorial](tutorial)** folder (human calmodulin). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method.
+Example files are available at the **[tutorial](tutorial)** folder (human calmodulin). We encourage users to test the multiple usages of **pyAdMD** using these files to get familiar with the method. Replace the `tutorial/` paths below with your own OpenMM- or NAMD-compatible inputs.
 
 ## Using OpenMM inputs and heavy atoms NMs
 ```
@@ -969,6 +1127,31 @@ pyadmd run -src OPENMM \
                      --subspace-search-modes 7,8,9,10,11,12,13,14,15,16 \
                      --subspace-alpha 0.5
 ```
+## Using alpha harmonization with beta diversification
+
+Three active modes (7–9), a ten-mode search reservoir (7–16), alpha = 0.5, beta = 0.2, and 1.2 kcal/mol excitation energy over 500 ps:
+
+```bash
+pyadmd run -src OPENMM \
+           -psf tutorial/system.psf \
+           -rst tutorial/system.rst \
+           -pdb tutorial/system.pdb \
+           -m CA \
+           -nm 7,8,9 \
+           -ek 1.2 \
+           -t 500 \
+           -rep 24 \
+           -seed 42 \
+           --cycle-steps 50 \
+           -r \
+           --recalc-method harmonized \
+           --subspace-search-modes 7,8,9,10,11,12,13,14,15,16 \
+           --subspace-alpha 0.5 \
+           --subspace-beta 0.2
+```
+
+Run from a new simulation directory. The excitation selection must include all ENM representative atoms. For four active modes with the default three supplementary directions, use `-nm 7,8,9,10` with the same reservoir; for four plus four, also add `--subspace-beta-count 4` and provide at least eight reservoir modes. To run the alpha-only counterpart in a separate directory, set `--subspace-beta 0`. Beta changes the geometry of the combined direction; `-ek` independently sets its energy target. See [Optional Transverse Diversification with Beta](#optional-transverse-diversification-with-beta).
+
 ## Restart unfinished pyAdMD simulations
 ```
 pyadmd restart

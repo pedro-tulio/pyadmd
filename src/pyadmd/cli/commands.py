@@ -49,11 +49,8 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
     """
     print(f"{console.PGM_NAM}{console.TLE}Setup and run aMDeNM simulations{console.STD}\n")
 
-    # Ensure inputs/ exists and the bundled CHARMM toppar archive is present
-    # before any file is copied into it or unzipped from it.
     ensure_charmm_toppar(input_dir)
 
-    # Common required files
     psffile = args.psffile
     pdbfile = args.pdbfile
     modefile = None
@@ -64,7 +61,6 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
     if args.modefile:
         common_files.append(modefile)
 
-    # Engine-specific files
     itype = args.source   # 'NAMD' or 'OPENMM'
 
     if itype == 'NAMD':
@@ -82,7 +78,6 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
         if strfile:
             engine_files.append(strfile)
 
-    # Existence check + copy to inputs/ folder
     for file in common_files + engine_files:
         if not os.path.isfile(file):
             print(f"{console.PGM_ERR}File {file.split('/')[-1]} not found.")
@@ -92,7 +87,6 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
             print(f"{console.PGM_WRN}File {console.WRN}{file.split('/')[-1]}{console.STD} "
                   "was copied to inputs folder.")
 
-    # Canonicalise paths to inputs/ folder
     psffile = f"{input_dir}/{psffile.split('/')[-1]}"
     pdbfile = f"{input_dir}/{pdbfile.split('/')[-1]}"
     if args.modefile:
@@ -108,11 +102,9 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
         if strfile:
             strfile = f"{input_dir}/{strfile.split('/')[-1]}"
 
-    # Build initial SystemState (engine-specific)
     if itype == 'NAMD':
         print(f"{console.PGM_NAM}Reading initial NAMD inputs (one-time conversion)...")
         init_state = NAMDInputReader.read_system(psffile, coorfile, velfile, xscfile)
-        # Rotate to canonical OpenMM box orientation
         a, b, c = init_state.box_vectors_nm
         R = NAMDInputReader.align_box_to_x(a, b, c)
         init_state.positions_nm     = (R @ init_state.positions_nm.T).T
@@ -125,24 +117,19 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
         print(f"{console.PGM_NAM}Reading OpenMM restart file: "
               f"{console.EXT}{rstfile.split('/')[-1]}{console.STD}...")
         init_state = OpenMMRestartReader.read_state(rstfile)
-        # (align_box_to_x rotation already applied inside read_state)
 
-    # Reference positions in Å (used for ENM, sys_coor, reference state)
     init_pos_ang = init_state.positions_nm * 10.0   # nm → Å
 
-    # Build reference Universe (topology + real positions, engine-agnostic)
     sys_coor = make_reference_universe(psffile, init_pos_ang)
-    sys_mass = sys_coor.atoms.masses          # System atomic mass
-    n_atoms  = sys_coor.atoms.n_atoms         # System number of atoms
+    sys_mass = sys_coor.atoms.masses
+    n_atoms  = sys_coor.atoms.n_atoms
     sel_mass = sys_coor.atoms.select_atoms(args.selection).masses
 
-    # Save reference positions, box, and velocities for downstream subcommands
     save_reference_state(input_dir, init_pos_ang, init_state.box_vectors_nm,
-                          init_state.velocities_nm_ps)
+                         init_state.velocities_nm_ps)
     print(f"{console.PGM_NAM}Reference state saved to "
           f"{console.EXT}inputs/init_reference_*.npy{console.STD}.")
 
-    # Store parameters
     nm_type  = args.model.lower()
     modes    = args.modes
     nm_parsed = [int(s) for s in modes.split(',')]
@@ -151,14 +138,11 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
     replicas = args.replicas
     use_rtb  = getattr(args, 'rtb', False)
 
-    # Derive base_name for ENM output directory naming.
-    # NAMD: coorfile prefix; OPENMM: rstfile prefix.
     if itype == 'NAMD':
         base_name = os.path.splitext(os.path.basename(coorfile))[0]
     else:
         base_name = os.path.splitext(os.path.basename(rstfile))[0]
 
-    # Store in args for SimulationRunner access
     if args.no_correc:
         n_steps = 1000  # Standard MDeNM: 1000 MD steps per cycle (2 fs/step → 2.0 ps/cycle)
     else:
@@ -166,28 +150,29 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
     args.n_steps = n_steps
     end_loop = int(sim_time / (n_steps * 0.002))
 
-    # Compute / write normal mode vectors
+    # Request enough computed modes to contain the largest requested label.
+    # Labels below 50 keep the historical solver request unchanged.
+    enm_options = {"max_modes": max(nm_parsed) + 1} if max(nm_parsed) >= 50 else {}
+
     if nm_type == "ca":
         print(f"\n{console.PGM_NAM}{console.HGH}Computing {console.EXT}Cα ENM"
               f"{console.STD}{console.HGH} and writing normal mode vectors "
               f"{console.EXT}{modes}{console.STD}.")
         enm_calculator.compute_enm(init_pos_ang, base_name, nm_type,
-                                   nm_parsed, input_dir, psffile, rtb=use_rtb)
+                                   nm_parsed, input_dir, psffile, rtb=use_rtb, **enm_options)
     elif nm_type == "heavy":
         print(f"\n{console.PGM_NAM}{console.HGH}Computing {console.EXT}Heavy atoms ENM"
               f"{console.STD}{console.HGH} and writing normal mode vectors "
               f"{console.EXT}{modes}{console.STD}.")
         enm_calculator.compute_enm(init_pos_ang, base_name, nm_type,
-                                   nm_parsed, input_dir, psffile, rtb=use_rtb)
+                                   nm_parsed, input_dir, psffile, rtb=use_rtb, **enm_options)
     elif nm_type == "charmm":
         print(f"\n{console.PGM_NAM}Writing {console.EXT}CHARMM{console.STD} "
               f"normal mode vectors {console.EXT}{modes}{console.STD}.")
         write_charmm_nm(modes, psffile, modefile, cwd)
 
-    # Extract NAMD topology and parameters files
     unzip_file(f"{input_dir}/charmm_toppar.zip", input_dir)
 
-    # Generate mode combinations
     print(f"\n{console.PGM_NAM}Generating {console.EXT}{replicas}{console.STD} uniformly "
           f"distributed combinations of modes {console.EXT}{modes}{console.STD} "
           f"(seed={console.EXT}{args.seed}{console.STD}).")
@@ -197,10 +182,8 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
     )
     mode_exciter.combine_modes(replicas, factors, cwd, sys_coor)
 
-    # Save parameters for potential restart/append
     param_storage.save_parameters(args, factors, nm_parsed, end_loop, cwd)
 
-    # Initialize and run SimulationRunner
     sim_runner = SimulationRunner(
         console, args, cwd, input_dir, psffile, pdbfile, coorfile, velfile,
         xscfile, strfile, sys_coor, n_atoms, sys_mass, sel_mass, energy,
@@ -211,7 +194,7 @@ def cmd_run(args: Any, console: ConsoleConfig, cwd: str, input_dir: str,
 
 
 def cmd_restart(console: ConsoleConfig, mode_exciter: ModeExciter,
-                 param_storage: ParameterStorage) -> None:
+                param_storage: ParameterStorage) -> None:
     """
     Implements ``pyadmd restart``: resume any replicas that have not yet
     reached their target cycle count.
@@ -223,7 +206,6 @@ def cmd_restart(console: ConsoleConfig, mode_exciter: ModeExciter,
     """
     print(f"{console.PGM_NAM}{console.TLE}Restart unfinished pyAdMD simulation{console.STD}\n")
 
-    # Load parameters
     params = param_storage.load_parameters()
     if params is None:
         sys.exit(1)
@@ -232,7 +214,6 @@ def cmd_restart(console: ConsoleConfig, mode_exciter: ModeExciter,
     end_loop  = params['end_loop']
     cwd       = params['cwd']
 
-    # Reconstruct file paths from stored args
     input_dir = f"{cwd}/inputs"
     itype     = getattr(args, 'source', 'NAMD').upper()
 
@@ -252,23 +233,19 @@ def cmd_restart(console: ConsoleConfig, mode_exciter: ModeExciter,
         strfile  = (f"{input_dir}/{args.strfile.split('/')[-1]}"
                     if getattr(args, 'strfile', None) else None)
 
-    # Get parameters from loaded args
     energy    = args.energy
     selection = args.selection
     replicas  = args.replicas
 
-    # Rebuild initial SystemState from saved reference state if
-    # available (avoids re-reading engine-specific files on restart).
     try:
         ref_positions_ang, ref_box_nm, ref_vel_nm_ps = load_reference_state(input_dir)
         init_state = SystemState(
             positions_nm     = ref_positions_ang * 0.1,
-            velocities_nm_ps = ref_vel_nm_ps,   # may still be None (older run); reassigned per-replica from checkpoint for already-started replicas
+            velocities_nm_ps = ref_vel_nm_ps,
             box_vectors_nm   = ref_box_nm,
         )
         print(f"{console.PGM_NAM}Reference state loaded from saved .npy files.")
     except FileNotFoundError:
-        # Legacy fallback: re-read the original engine-specific files.
         if itype == 'NAMD':
             print(f"{console.PGM_WRN}Reference state not found; "
                   "reading NAMD binary inputs.")
@@ -287,8 +264,6 @@ def cmd_restart(console: ConsoleConfig, mode_exciter: ModeExciter,
                   "reading OpenMM restart file.")
             init_state = OpenMMRestartReader.read_state(rstfile)
 
-    # Fallback to re-reading the original engine-specific input files so that
-    # velocities_nm_ps is populated before any fresh-start replica needs it.
     if init_state.velocities_nm_ps is None:
         print(f"{console.PGM_WRN}Reference state has no velocities; "
               "reading original input files to recover them.")
@@ -309,14 +284,12 @@ def cmd_restart(console: ConsoleConfig, mode_exciter: ModeExciter,
     n_atoms  = sys_coor.atoms.n_atoms
     sel_mass = sys_coor.atoms.select_atoms(selection).masses
 
-    # Initialize the simulation runner
     sim_runner = SimulationRunner(
         console, args, cwd, input_dir, psffile, pdbfile, coorfile, velfile,
         xscfile, strfile, sys_coor, n_atoms, sys_mass, sel_mass, energy,
         mode_exciter, init_state=init_state,
     )
 
-    # Check if any replicas need to be processed
     replicas_to_process = []
     for rep in range(1, replicas + 1):
         rep_dir = f"{cwd}/rep{rep}"
@@ -331,7 +304,6 @@ def cmd_restart(console: ConsoleConfig, mode_exciter: ModeExciter,
         print(f"\n{console.PGM_WRN}All replicas are already completed. No need to restart.")
         return
 
-    # Process replicas that need to be restarted
     for rep in replicas_to_process:
         rep_dir    = f"{cwd}/rep{rep}"
         last_cycle = find_last_completed_cycle(rep_dir)
@@ -377,7 +349,6 @@ def cmd_append(args: Any, console: ConsoleConfig, mode_exciter: ModeExciter,
     original_end_loop  = params['end_loop']
     cwd                = params['cwd']
 
-    # Calculate new end loop and update total time
     n_steps           = args_dict.n_steps
     additional_steps  = int(additional_time / (n_steps * 0.002))
     new_end_loop      = original_end_loop + additional_steps
@@ -385,7 +356,6 @@ def cmd_append(args: Any, console: ConsoleConfig, mode_exciter: ModeExciter,
     params['end_loop'] = new_end_loop
     param_storage.save_parameters(args_dict, factors, nm_parsed, new_end_loop, cwd)
 
-    # Reconstruct file paths
     input_dir = f"{cwd}/inputs"
     itype     = getattr(args_dict, 'source', 'NAMD').upper()
 
@@ -409,7 +379,6 @@ def cmd_append(args: Any, console: ConsoleConfig, mode_exciter: ModeExciter,
     selection = args_dict.selection
     replicas  = args_dict.replicas
 
-    # Rebuild initial SystemState from reference state
     try:
         ref_positions_ang, ref_box_nm, ref_vel_nm_ps = load_reference_state(input_dir)
         init_state = SystemState(
@@ -437,8 +406,6 @@ def cmd_append(args: Any, console: ConsoleConfig, mode_exciter: ModeExciter,
                   "reading OpenMM restart file.")
             init_state = OpenMMRestartReader.read_state(rstfile)
 
-    # Same guard as 'restart': recover velocities from original input
-    # files if the saved reference state consume velocity values.
     if init_state.velocities_nm_ps is None:
         print(f"{console.PGM_WRN}Reference state has no velocities; "
               "reading original input files to recover them.")
@@ -459,14 +426,12 @@ def cmd_append(args: Any, console: ConsoleConfig, mode_exciter: ModeExciter,
     n_atoms  = sys_coor.atoms.n_atoms
     sel_mass = sys_coor.atoms.select_atoms(selection).masses
 
-    # Initialize the simulation runner
     sim_runner = SimulationRunner(
         console, args_dict, cwd, input_dir, psffile, pdbfile, coorfile, velfile,
         xscfile, strfile, sys_coor, n_atoms, sys_mass, sel_mass, energy,
         mode_exciter, init_state=init_state,
     )
 
-    # Check if any replicas need to be extended
     replicas_to_extend = []
     for rep in range(1, replicas + 1):
         rep_dir = f"{cwd}/rep{rep}"
@@ -531,17 +496,12 @@ def cmd_analyze(args: Any, console: ConsoleConfig) -> None:
 
 
 def cmd_fel(args: Any, console: ConsoleConfig,
-                    param_storage: ParameterStorage) -> None:
+            param_storage: ParameterStorage) -> None:
     """
     Implements ``pyadmd fel``: compute (or extend) the free energy
     landscape from completed aMDeNM replicas, or -- if ``--export-cluster``
     is set -- export a single already-computed cluster's membership (and
     optionally per-member PDBs) instead.
-
-    The export path deliberately runs before ``FreeEnergyCalculator`` is
-    constructed: it only needs the persisted clusters cache and the saved
-    run parameters, not the full calculator's OpenMM System build, which a
-    read-only cluster-inspection operation has no use for.
 
     Args:
         args: Parsed CLI arguments for the ``fel`` subcommand.
@@ -576,11 +536,10 @@ def cmd_clean(console: ConsoleConfig, cwd: str) -> None:
     """
     print(f"{console.PGM_NAM}{console.TLE}Clean previous pyAdMD setup files{console.STD}\n")
 
-    # Removing previous replicas folders
     files = os.listdir(cwd)
     for item in files:
         if item.endswith((".json", "summary.txt", ".out")):
-             os.remove(os.path.join(cwd, item))
+            os.remove(os.path.join(cwd, item))
         if item.startswith(("rep", "analysis", "fel", "tools", "inputs")):
             shutil.rmtree(os.path.join(cwd, item), ignore_errors=True)
 
@@ -596,31 +555,17 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
     Two mutually exclusive paths:
 
       - ``-w/--write-modes`` set: re-derive vector/trajectory files from a
-        previously completed run's saved arrays, without recomputing the
-        ENM (``ENMAnalyzer.write_modes_from_files``). ``--rtb`` has no
-        effect on this path (no diagonalization is performed here) and a
-        warning is printed if both are given.
-      - Otherwise: run a full ENM computation from ``-i/--input``, save
-        the filtered mode/frequency arrays plus the reduced structure
-        PDB (both written by ``ENMCalculator.create_system``/
-        ``compute_normal_modes``), then delegate to the same
-        ``write_modes_from_files`` path used by ``-w`` for the actual
-        vector/trajectory writing -- so the two paths always agree on
-        file format, and the logic is written once. When ``--rtb`` is
-        set, diagonalization is routed through the RTB block-projection
-        reduction (``pyadmd.enm.rtb``) instead of direct diagonalization
-        of the full Hessian, mirroring ``ENMCalculator.compute_enm``'s
-        own ``rtb`` branch.
+        previously completed run's saved arrays, without recomputing the ENM.
+      - Otherwise: full ENM computation from ``-i/--input``, then the same
+        ``write_modes_from_files`` path used by ``-w``.
 
     Args:
         args: Parsed CLI arguments for the ``enm`` subcommand.
         console: Console configuration for formatted output.
-        enm_calculator: Shared ENMCalculator instance (same one
-            ``cmd_run`` uses for CA/HEAVY mode generation).
+        enm_calculator: Shared ENMCalculator instance.
     """
     analyzer = ENMAnalyzer(console)
 
-    # -w / --write-modes: post-hoc path, no recomputation needed
     if args.write_modes is not None:
         if getattr(args, 'rtb', False):
             print(f"{console.PGM_WRN}--rtb has no effect with -w/--write-modes "
@@ -658,7 +603,6 @@ def cmd_enm(args: Any, console: ConsoleConfig, enm_calculator: ENMCalculator) ->
         print(f"{console.PGM_NAM}RTB (Rotations-Translations of Blocks) "
               f"{console.EXT}enabled{console.STD} (1 residue per block).")
 
-    # System build + Hessian + diagonalization
     try:
         system, topology, positions = enm_calculator.create_system(
             args.input,

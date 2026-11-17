@@ -2,6 +2,7 @@
 
 import csv
 import gc
+import hashlib
 import json
 import os
 import shutil
@@ -21,7 +22,12 @@ from pyadmd.io.openmm_restart import OpenMMRestartReader
 from pyadmd.io.state import SystemState, make_reference_universe
 from pyadmd.enm.calculator import ENMCalculator
 from pyadmd.modes.exciter import ModeExciter
-from pyadmd.modes.subspace import harmonize_and_transport
+from pyadmd.modes.subspace import harmonize_and_transport, kabsch_rotation
+from pyadmd.modes.diversity import (
+    harmonize_with_diversity,
+    validate_diversity,
+    write_diversity_spectrum,
+)
 from pyadmd.simulation.engine import OpenMMSimulationEngine
 from pyadmd.simulation.system_builder import OpenMMSystemBuilder
 
@@ -30,20 +36,12 @@ class SimulationRunner:
     """
     Handles running, restarting, and appending aMDeNM simulations.
 
-    This class provides a unified interface for managing simulation runs,
-    including initialization, execution, and cleanup of replica simulations.
-
     Attributes:
         console (ConsoleConfig): Console configuration object for formatted output.
         args (argparse.Namespace): Command line arguments.
         cwd (str): Current working directory.
         input_dir (str): Input directory path.
         psffile (str): PSF topology file path.
-        pdbfile (str): PDB structure file path.
-        coorfile (str): Coordinate file path.
-        velfile (str): Velocity file path.
-        xscfile (str): Extended system configuration file path.
-        strfile (str): Structure file path.
         sys_coor (mda.Universe): System structure universe.
         n_atoms (int): Total number of atoms.
         sys_mass (np.ndarray): System atomic masses.
@@ -56,31 +54,32 @@ class SimulationRunner:
     # (see ``ENMCalculator._create_ca_system``).
     _SBP_BEAD_NAMES: Tuple[str, ...] = ("P", "C1'", "C2")
 
-    def __init__(self, console: ConsoleConfig, args: 'Any', cwd: str, input_dir: str,
+    def __init__(self, console: ConsoleConfig, args: Any, cwd: str, input_dir: str,
                  psffile: str, pdbfile: str, coorfile: Optional[str], velfile: Optional[str],
                  xscfile: Optional[str], strfile: Optional[str], sys_coor: mda.Universe,
                  n_atoms: int, sys_mass: np.ndarray, sel_mass: np.ndarray, energy: float,
-                 mode_exciter: 'ModeExciter',
-                 init_state: 'SystemState',
+                 mode_exciter: ModeExciter,
+                 init_state: SystemState,
                  platform: str = 'auto', n_threads: Optional[int] = None) -> None:
         """
         Initialize SimulationRunner.
 
         Accepts a pre-built ``SystemState`` (``init_state``) so that the runner
         is engine-agnostic: both the NAMD and OpenMM input paths produce a
-        ``SystemState`` before constructing this object, and no further
-        engine-specific I/O occurs after this point.
+        ``SystemState`` before constructing this object.
 
         Args:
             console, args, cwd, input_dir, psffile, pdbfile, coorfile, velfile,
             xscfile, strfile, sys_coor, n_atoms, sys_mass, sel_mass, energy,
-            mode_exciter: same as before (coorfile/velfile/xscfile/strfile may
-                be None in OpenMM input mode).
-            init_state (SystemState): Pre-built initial state (positions in nm,
-                velocities in nm/ps, box vectors in nm) already rotated to the
-                canonical OpenMM box orientation.
+            mode_exciter: as in 3.5.0 (coorfile/velfile/xscfile/strfile may be
+                None in OpenMM input mode).
+            init_state (SystemState): Initial state, rotated to canonical OpenMM
+                box orientation.
             platform (str): OpenMM platform ('auto', 'cuda', 'opencl', 'cpu').
             n_threads (int): CPU thread count for the CPU platform.
+
+        Raises:
+            ValueError: If the beta options are inconsistent with the run.
         """
         self.console = console
         self.args = args
@@ -103,7 +102,18 @@ class SimulationRunner:
         self._platform    = platform
         self._n_threads   = n_threads
         self._temperature = 303.15   # Kelvin
-        self._nh_frequency = float(getattr(args, 'nh_frequency', 1.0))   # ps^-1, Nose-Hoover coupling
+        self._nh_frequency = float(getattr(args, 'nh_frequency', 1.0))   # ps^-1
+
+        # Optional beta path: validate before anything is built.
+        beta = self._beta()
+        active = [int(x) for x in str(args.modes).split(',') if x.strip()]
+        search = self._get_subspace_search_modes(active)
+        validate_diversity(self._alpha(), beta, active, search, self._beta_count())
+        if beta:
+            if not self._is_harmonized():
+                raise ValueError("--subspace-beta requires -r --recalc-method harmonized")
+            if str(args.model).upper() not in ('CA', 'HEAVY'):
+                raise ValueError("--subspace-beta requires an ENM model (CA or HEAVY)")
 
         # Consume the pre-built SystemState (already rotated to canonical form)
         self._init_state = init_state
@@ -111,20 +121,11 @@ class SimulationRunner:
         # Cache initial positions for diagnostics and direction correction
         self._init_pos_nm: np.ndarray = self._init_state.positions_nm.copy()
 
-        # Build a reference MDAnalysis Universe from the initial positions.
-        # This replaces all downstream patterns of the form
-        #   mda.Universe(psffile, coorfile, format='NAMDBIN')
-        # which assumed NAMD binary input.  The reference Universe is topology
-        # + real positions; no engine-specific data is needed.
+        # Reference Universe: topology + real positions, engine-agnostic.
         init_pos_ang = self._init_pos_nm * 10.0   # nm → Å
         self._ref_universe: mda.Universe = make_reference_universe(psffile, init_pos_ang)
 
-        # Derive str_box for PME sizing.
-        # Priority:
-        #   1. Parse from .str file (NAMD mode or optional in OpenMM mode).
-        #   2. Derive from .rst box vectors via box_vectors_to_cell (OpenMM mode,
-        #      no .str supplied).
-        #   3. Fall back to None (legacy placeholder — not recommended).
+        # Derive str_box for PME sizing (.str file, else initial-state box).
         str_box = None
         if strfile:
             try:
@@ -137,7 +138,6 @@ class SimulationRunner:
                     f"alpha={str_box['alpha']:.2f} beta={str_box['beta']:.2f} "
                     f"gamma={str_box['gamma']:.2f} deg"
                 )
-                # Cross-check str lengths against init_state box vectors (warn if >5%)
                 rst_lengths_nm = [float(np.linalg.norm(v))
                                   for v in self._init_state.box_vectors_nm]
                 str_lengths_nm = [float(np.linalg.norm(v))
@@ -157,9 +157,6 @@ class SimulationRunner:
                 str_box = None
 
         if str_box is None:
-            # Derive cell parameters from the initial state's box vectors.
-            # This is the primary path for OpenMM input mode when no .str is given,
-            # and also the fallback for NAMD mode when .str parsing fails.
             a_rot, b_rot, c_rot = self._init_state.box_vectors_nm
             try:
                 str_box = OpenMMRestartReader.box_vectors_to_cell(a_rot, b_rot, c_rot)
@@ -176,7 +173,7 @@ class SimulationRunner:
                       f"({console.WRN}{exc}{console.STD}); using placeholder box (not recommended).")
                 str_box = None
 
-        # Build OpenMM System with real box dimensions from .str file
+        # Build OpenMM System with real box dimensions
         toppar_dir = os.path.join(input_dir, "charmm_toppar")
         builder = OpenMMSystemBuilder(console)
         self._psf_omm, self._omm_system, self._system_type = builder.build(
@@ -193,15 +190,13 @@ class SimulationRunner:
               f"{console.EXT}{_omm_n}{console.STD} atoms in both OpenMM system and PSF.")
 
         # In-memory correction state (initialised per-replica)
-        self._cntrl_vec:         Optional[np.ndarray] = None  # Q vector, Å convention
+        self._cntrl_vec:         Optional[np.ndarray] = None  # Q vector, full system
         self._exc_vel_akma:      Optional[np.ndarray] = None  # excitation velocity, AKMA
         self._correc_ref_pos_nm: Optional[np.ndarray] = None  # RMS-displacement reference
         self._align_ref_pos_nm:  Optional[np.ndarray] = None  # alignment reference
         self._curr_pos_nm:       Optional[np.ndarray] = None  # positions this cycle
         self._prev_pos_nm:       Optional[np.ndarray] = None  # positions previous cycle
-        self._avg_pos_nm:        Optional[np.ndarray] = None  # last average structure (mirrors average_{loop}.coor)
-        self._cntrl_vec_history:    List[np.ndarray] = []
-        self._exc_vel_akma_history: List[np.ndarray] = []
+        self._avg_pos_nm:        Optional[np.ndarray] = None  # last average structure
 
         # Energy correction thresholds
         self.top    = energy * 1.25
@@ -211,13 +206,29 @@ class SimulationRunner:
         self.globfreq = self.cos_alpha = self.qrms_correc = 0.5
 
         # ENM subspace tracking (only used with --recalc --recalc-method harmonized).
-        # Both arrays live on the excitation atom subset (see ``_enm_selection_atoms``).
         self._enm_basis_modes:      Optional[np.ndarray] = None  # active subspace U_m, (m, n_sel, 3)
         self._enm_basis_ref_pos_nm: Optional[np.ndarray] = None  # positions the basis refers to, (N, 3) nm
+        self._enm_reservoir_modes:  Optional[np.ndarray] = None  # beta reservoir, (M, n_sel, 3)
 
     # ------------------------------------------------------------------ #
-    # Selection and mode-basis helpers                                    #
+    # Option helpers                                                      #
     # ------------------------------------------------------------------ #
+
+    def _alpha(self) -> float:
+        """Return the alpha mixing factor (default 1.0 for older parameter files)."""
+        return float(getattr(self.args, 'subspace_alpha', 1.0))
+
+    def _beta(self) -> float:
+        """Return the beta amplitude (default 0.0 for older parameter files)."""
+        return float(getattr(self.args, 'subspace_beta', 0.0))
+
+    def _beta_count(self) -> int:
+        """Return the number of supplementary beta directions (default 3)."""
+        return int(getattr(self.args, 'subspace_beta_count', 3))
+
+    def _diversity_enabled(self) -> bool:
+        """Return True when the optional beta path is active."""
+        return self._beta() > 0
 
     def _is_harmonized(self) -> bool:
         """
@@ -225,49 +236,52 @@ class SimulationRunner:
 
         Returns:
             bool: True if ``--recalc`` is set and ``--recalc-method`` is
-                ``harmonized``; False otherwise (including parameter files
-                written by versions that predate these flags).
+                ``harmonized``; False otherwise.
         """
         return (bool(getattr(self.args, 'recalc', False))
                 and getattr(self.args, 'recalc_method', 'random') == 'harmonized')
 
-    def _log_memory(self, tag: str) -> None:
-        """
-        Print the resident memory of the process (opt-in diagnostic).
+    @staticmethod
+    def _state_digest(path: str) -> Optional[str]:
+        """SHA-256 of a file, or None if it does not exist."""
+        if not os.path.isfile(path):
+            return None
+        with open(path, 'rb') as stream:
+            return hashlib.sha256(stream.read()).hexdigest()
 
-        Active only when the environment variable ``PYADMD_MEMLOG`` is set to
-        a non-empty value other than ``0``. Reads ``VmRSS`` from
-        ``/proc/self/status`` (Linux), so it needs no extra dependency, and
-        reports the change since the previous call. Silently does nothing on
-        platforms without ``/proc``.
+    def _excite_control_vector(self, q: np.ndarray, energy: float,
+                               masses: np.ndarray) -> np.ndarray:
+        """
+        Excitation velocity (AKMA) of a control direction.
+
+        Official 3.5.0 scaling in the alpha path; for beta the direction is a
+        mass-weighted unit vector and the velocity is converted to physical
+        units, so that the kinetic energy along it equals ``energy``.
 
         Args:
-            tag (str): Label identifying the measurement point.
+            q (np.ndarray): Direction, shape (n_sel, 3).
+            energy (float): Target kinetic energy, kcal/mol.
+            masses (np.ndarray): Masses of the selected atoms, amu.
+
+        Returns:
+            np.ndarray: Excitation velocity, shape (n_sel, 3).
         """
-        if os.environ.get("PYADMD_MEMLOG", "0") in ("", "0"):
-            return
-        try:
-            with open("/proc/self/status") as fh:
-                rss_kb = next(int(line.split()[1]) for line in fh if line.startswith("VmRSS:"))
-        except (OSError, StopIteration, ValueError):
-            return
-        rss_mb = rss_kb / 1024.0
-        last = getattr(self, "_memlog_last", None)
-        delta = "" if last is None else f" ({rss_mb - last:+.1f} MB)"
-        self._memlog_last = rss_mb
-        print(f"{self.console.PGM_NAM}[memlog] {tag}: RSS={rss_mb:.1f} MB{delta}")
+        if not self._diversity_enabled():
+            return self.mode_exciter.excite(q, energy, masses)
+        q = np.asarray(q, dtype=float)
+        masses = np.asarray(masses, dtype=float)
+        if masses.shape != (len(q),) or not np.isfinite(masses).all() or np.any(masses <= 0):
+            raise ValueError("diversification requires positive finite atomic masses")
+        if not np.isfinite(q).all() or np.linalg.norm(q) < 1e-14 or not np.isfinite(energy) or energy < 0:
+            raise ValueError("excitation requires a finite nonzero direction and non-negative energy")
+        return np.sqrt(2 * energy) * q / np.linalg.norm(q) / np.sqrt(masses)[:, None]
+
+    # ------------------------------------------------------------------ #
+    # Memory helpers                                                      #
+    # ------------------------------------------------------------------ #
 
     def _release_memory(self) -> None:
-        """
-        Collect garbage and return freed heap memory to the operating system.
-
-        Large temporary objects (ENM Hessians, MDAnalysis Universes, OpenMM
-        Contexts) are often held by reference cycles until the next full
-        garbage collection, and the glibc allocator keeps freed arenas in the
-        process, so the resident size grows with each ENM recalculation even
-        though the memory is no longer in use. This method runs a full
-        collection and, where available, calls ``malloc_trim``.
-        """
+        """Collect garbage and return freed heap memory to the operating system."""
         gc.collect()
         try:
             import ctypes
@@ -275,18 +289,54 @@ class SimulationRunner:
         except (OSError, AttributeError):
             pass
 
+    # ------------------------------------------------------------------ #
+    # Selection and mode-basis helpers                                    #
+    # ------------------------------------------------------------------ #
+
+    def _get_subspace_search_modes(self, nm_parsed: List[int]) -> List[int]:
+        """
+        Return the larger ENM search space M used for subspace tracking.
+
+        Args:
+            nm_parsed (list[int]): Active mode numbers (dimension m).
+
+        Returns:
+            list[int]: Search-space mode numbers (dimension M >= m).
+
+        Raises:
+            ValueError: If the list is malformed, has duplicates, is smaller
+                than ``nm_parsed``, or does not contain every active mode.
+        """
+        raw = getattr(self.args, "subspace_search_modes", None)
+        if raw is None or str(raw).strip() == "":
+            return list(nm_parsed)
+
+        try:
+            search_modes = [int(x.strip()) for x in str(raw).split(",") if x.strip()]
+        except ValueError as exc:
+            raise ValueError(
+                "--subspace-search-modes must be a comma-separated list of integers"
+            ) from exc
+
+        if len(search_modes) < len(nm_parsed):
+            raise ValueError(
+                f"subspace search space must satisfy M >= m; "
+                f"got M={len(search_modes)}, m={len(nm_parsed)}"
+            )
+        if len(set(search_modes)) != len(search_modes):
+            raise ValueError("--subspace-search-modes contains duplicate mode indices")
+        missing = [mode for mode in nm_parsed if mode not in search_modes]
+        if missing:
+            raise ValueError(
+                "the active modes given by -nm must be contained in "
+                f"--subspace-search-modes; missing: {missing}"
+            )
+        return search_modes
+
     def _enm_selection_atoms(self) -> mda.AtomGroup:
         """
         Return the excitation/correction atoms: the ENM representative atoms
         within the user-provided selection.
-
-        The user selection (``-sel``) is always evaluated first, then reduced
-        to the atoms that carry the normal-mode vectors:
-
-          - Cα model: protein Cα atoms and the nucleic SBP beads
-            (P, C1', C2) -- the same beads built by
-            ``ENMCalculator._create_ca_system``.
-          - HEAVY / CHARMM models: all non-hydrogen atoms.
 
         Returns:
             mda.AtomGroup: Sorted, unique atoms of the reference Universe.
@@ -313,12 +363,7 @@ class SimulationRunner:
     def _validate_enm_selection(self, sel_ix: np.ndarray) -> None:
         """
         Verify that every excitation atom belongs to the ENM atom set
-        (``protein or nucleic``), so that ENM recalculation can map mode
-        vectors onto the selection.
-
-        Called at the start of each replica with ``--recalc`` so that an
-        incompatible selection (e.g. one including ions) fails immediately
-        rather than at the first correction.
+        (``protein or nucleic``).
 
         Args:
             sel_ix (np.ndarray): System indices of the excitation atoms.
@@ -339,27 +384,20 @@ class SimulationRunner:
         """
         Read ENM mode vectors and reduce them to the excitation atom subset.
 
-        Mode ``.xyz`` files written by ``ENMCalculator.write_nm_vectors`` hold
-        one vector per atom of the ENM input structure (``protein or nucleic``)
-        with zeros on atoms that are not ENM representatives. When ``sel_ix``
-        is given, the rows belonging to the selected atoms are extracted.
-
         Args:
-            base_name (str): Base name of the ENM run; the mode files are read
-                from ``{rep_dir}/{base_name}_enm/``.
+            base_name (str): Base name of the ENM run; files are read from
+                ``{rep_dir}/{base_name}_enm/``.
             mode_numbers (list[int]): Mode numbers to read, in order.
-            rep_dir (str): Replica working directory containing the ENM folder.
-            sel_ix (np.ndarray, optional): System indices of the excitation
-                atoms. If None, the full per-file vectors are returned.
+            rep_dir (str): Directory containing the ENM folder.
+            sel_ix (np.ndarray, optional): System indices of the excitation atoms.
 
         Returns:
-            np.ndarray: Array of shape (n_modes, n_atoms, 3), with
-                ``n_atoms = len(sel_ix)`` when ``sel_ix`` is given.
+            np.ndarray: Array of shape (n_modes, n_atoms, 3).
 
         Raises:
             FileNotFoundError: If the ENM directory or a mode file is missing.
-            ValueError: If a selected atom is not protein/nucleic, or a mode
-                file has an unexpected atom count.
+            ValueError: If a selected atom is not protein/nucleic, or a mode file
+                has an unexpected atom count.
             RuntimeError: If the assembled basis has an invalid shape.
         """
         enm_dir = os.path.join(rep_dir, f"{base_name}_enm")
@@ -368,7 +406,6 @@ class SimulationRunner:
         if not os.path.isdir(enm_dir):
             raise FileNotFoundError(f"ENM directory not found: {enm_dir}")
 
-        # Atoms of the ENM input structure, in file order (see ENMCalculator.compute_enm)
         enm_ix = np.asarray(self._ref_universe.select_atoms("protein or nucleic").ix, dtype=int)
         enm_local = {int(full_ix): local_ix for local_ix, full_ix in enumerate(enm_ix)}
 
@@ -418,46 +455,116 @@ class SimulationRunner:
             )
         return basis
 
-    def _save_correction_state(self, loop: int, cnt: int) -> None:
+    def _read_diversity_spectrum(self, base_name: str, search_modes: List[int],
+                                 sel_ix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Persist in-memory correction state to disk every 10 cycles.
+        Read a beta reservoir spectrum written by ``write_diversity_spectrum``.
 
-        Written files:
-          correction_state.json       — scalar state (cycle, cnt, qrms_correc)
-          _state_cntrl_vec.npy        — current Q direction vector (Å, full system)
-          _state_exc_vel_akma.npy     — current excitation velocity (AKMA, full system)
-          _state_correc_ref_pos_nm.npy— RMS-displacement reference positions (nm)
-          _state_align_ref_pos_nm.npy — Kabsch alignment reference positions (nm)
-          _state_init_pos_nm.npy      — replica initial positions used for coordinate
-                                        projection; needed to keep coor-proj.out
-                                        consistent across restarts/appends
-          _state_avg_pos_nm.npy       — most recent average-structure positions (nm);
-                                        mirrors the original correc_ref.coor / average_{loop}.coor
-                                        files so that restarts can resume the adaptive
-                                        direction-correction without re-loading NAMD binaries
-          _state_enm_basis_modes.npy  — active ENM subspace U_m (harmonized method only)
-          _state_enm_basis_ref_pos_nm.npy — positions U_m refers to (harmonized method only)
+        Args:
+            base_name (str): ENM base name (``step_{loop}`` or ``subspace_initial``).
+            search_modes (list[int]): Expected reservoir labels, in order.
+            sel_ix (np.ndarray): System indices of the excitation atoms.
+
+        Returns:
+            tuple: (basis, stiffness) with basis of shape (M, n_sel, 3) on the
+                excitation atoms and stiffness the (M, M) modal matrix.
+
+        Raises:
+            ValueError: On schema/order mismatch, incomplete selection, or a
+                basis that is not orthonormal.
+        """
+        prefix = "ca" if self.args.model.lower() == 'ca' else "heavy"
+        path = os.path.join(f"{base_name}_enm", f"{base_name}_{prefix}_diversity_spectrum.npz")
+        with np.load(path, allow_pickle=False) as data:
+            if int(data['schema']) != 1 or list(data['mode_numbers']) != search_modes:
+                raise ValueError("diversity spectrum mode order/schema mismatch")
+            enm_ix = np.asarray(self._ref_universe.select_atoms("protein or nucleic").ix)
+            full_ix = enm_ix[data['atom_input_indices']]
+            if len(set(full_ix)) != len(full_ix) or not np.isin(full_ix, sel_ix).all():
+                raise ValueError("beta requires the whole ENM representative-atom selection")
+            local = {int(full): i for i, full in enumerate(sel_ix)}
+            rows = np.array([local[int(i)] for i in full_ix])
+            basis = np.zeros((len(search_modes), len(sel_ix), 3))
+            basis[:, rows] = data['modes']
+            flat = basis.reshape(len(search_modes), -1)
+            if not np.isfinite(flat).all() or not np.allclose(
+                    flat @ flat.T, np.eye(len(search_modes)), atol=1e-7):
+                raise ValueError("beta spectrum is not a complete orthonormal mass-weighted basis")
+            return basis, data['stiffness'].copy()
+
+    # ------------------------------------------------------------------ #
+    # State persistence                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _save_cycle_state(self, loop: int, cnt: int, engine: OpenMMSimulationEngine) -> None:
+        """
+        Persist the adaptive state; in beta mode also seal the checkpoint so
+        that the state and the checkpoint describe the same instant.
 
         Args:
             loop (int): Current cycle number.
             cnt (int): Correction counter.
+            engine (OpenMMSimulationEngine): Active engine.
+        """
+        if self._diversity_enabled():
+            engine.save_checkpoint('checkpoint.chk')
+        self._save_correction_state(loop, cnt)
+
+    def _save_correction_state(self, loop: int, cnt: int) -> None:
+        """
+        Persist in-memory correction state to disk.
+
+        Written files:
+          correction_state.json, _state_cntrl_vec.npy, _state_exc_vel_akma.npy,
+          _state_correc_ref_pos_nm.npy, _state_align_ref_pos_nm.npy,
+          _state_init_pos_nm.npy, _state_avg_pos_nm.npy,
+          _state_enm_basis_modes.npy and _state_enm_basis_ref_pos_nm.npy
+          (harmonized method), and in beta mode _state_enm_reservoir_modes.npy
+          plus _state_enm_diversity.json (configuration and checksums).
+
+        Args:
+            loop (int): Current cycle number.
+            cnt (int): Correction counter.
+
+        Raises:
+            RuntimeError: If beta is active but no reservoir is held.
         """
         np.save("_state_cntrl_vec.npy",         self._cntrl_vec)
-        np.save("_state_exc_vel_akma.npy",       self._exc_vel_akma)
-        np.save("_state_correc_ref_pos_nm.npy",  self._correc_ref_pos_nm)
-        np.save("_state_align_ref_pos_nm.npy",   self._align_ref_pos_nm)
-        np.save("_state_init_pos_nm.npy",        self._init_pos_nm)
-        # Average position is only meaningful after at least one correction step;
-        # fall back to correc_ref if not yet set separately. Use correc_ref as
-        # fallback when _avg_pos_nm is None (no correction step has fired yet).
+        np.save("_state_exc_vel_akma.npy",      self._exc_vel_akma)
+        np.save("_state_correc_ref_pos_nm.npy", self._correc_ref_pos_nm)
+        np.save("_state_align_ref_pos_nm.npy",  self._align_ref_pos_nm)
+        np.save("_state_init_pos_nm.npy",       self._init_pos_nm)
         avg = self._avg_pos_nm if self._avg_pos_nm is not None else self._correc_ref_pos_nm
-        np.save("_state_avg_pos_nm.npy",         avg)
-        # Persist the adaptive ENM subspace so a restart preserves continuity
-        # across the last accepted U_m -> V_harm update.
+        np.save("_state_avg_pos_nm.npy",        avg)
         if self._enm_basis_modes is not None:
             np.save("_state_enm_basis_modes.npy", self._enm_basis_modes)
         if self._enm_basis_ref_pos_nm is not None:
             np.save("_state_enm_basis_ref_pos_nm.npy", self._enm_basis_ref_pos_nm)
+        if self._diversity_enabled():
+            if self._enm_reservoir_modes is None:
+                raise RuntimeError("cannot save beta state without the transported reservoir")
+            np.save("_state_enm_reservoir_modes.npy", self._enm_reservoir_modes)
+            search = self._get_subspace_search_modes(
+                [int(x) for x in str(self.args.modes).split(',')])
+            names = ('_state_cntrl_vec.npy', '_state_exc_vel_akma.npy',
+                     '_state_correc_ref_pos_nm.npy', '_state_align_ref_pos_nm.npy',
+                     '_state_init_pos_nm.npy', '_state_avg_pos_nm.npy',
+                     '_state_enm_basis_modes.npy', '_state_enm_basis_ref_pos_nm.npy',
+                     '_state_enm_reservoir_modes.npy')
+            with open("_state_enm_diversity.json", "w") as stream:
+                json.dump({
+                    "schema": 3,
+                    "beta": self._beta(),
+                    "beta_count": self._beta_count(),
+                    "alpha": self._alpha(),
+                    "active_modes": str(self.args.modes),
+                    "search_modes": search,
+                    "metric": "mass-weighted/current-md-frame-v1",
+                    "cycle": loop,
+                    "cnt": cnt,
+                    "checkpoint_sha256": self._state_digest('checkpoint.chk'),
+                    "state_sha256": {name: self._state_digest(name) for name in names},
+                }, stream, indent=2)
         with open("correction_state.json", 'w') as fh:
             json.dump({'cycle': loop, 'cnt': cnt,
                        'qrms_correc': self.qrms_correc}, fh, indent=2)
@@ -466,65 +573,109 @@ class SimulationRunner:
         """
         Restore in-memory correction state from disk.
 
+        In beta mode the saved configuration, checksums and checkpoint are
+        verified; any mismatch aborts the restart instead of silently
+        reinitializing the reservoir.
+
         Returns:
-            (loop, cnt, qrms_correc) scalar triple.
+            tuple: (loop, cnt, qrms_correc).
 
         Raises:
-            FileNotFoundError: If any required file is missing.
+            FileNotFoundError: If a required file is missing.
+            ValueError: If beta restart data are inconsistent.
         """
         self._cntrl_vec         = np.load("_state_cntrl_vec.npy")
         self._exc_vel_akma      = np.load("_state_exc_vel_akma.npy")
         self._correc_ref_pos_nm = np.load("_state_correc_ref_pos_nm.npy")
         self._align_ref_pos_nm  = np.load("_state_align_ref_pos_nm.npy")
-        # Restore the replica's initial positions (used for coordinate projection).
         if os.path.exists("_state_init_pos_nm.npy"):
             self._init_pos_nm = np.load("_state_init_pos_nm.npy")
         if os.path.exists("_state_avg_pos_nm.npy"):
             try:
                 self._avg_pos_nm = np.load("_state_avg_pos_nm.npy")
             except ValueError:
-                # Legacy file was saved as a None object array (before first
-                # correction step).  Fall back to correc_ref_pos_nm.
                 self._avg_pos_nm = self._correc_ref_pos_nm.copy()
         if os.path.exists("_state_enm_basis_modes.npy"):
             self._enm_basis_modes = np.load("_state_enm_basis_modes.npy")
         if os.path.exists("_state_enm_basis_ref_pos_nm.npy"):
             self._enm_basis_ref_pos_nm = np.load("_state_enm_basis_ref_pos_nm.npy")
+
+        state_cycle = state_cnt = None
+        if self._diversity_enabled():
+            if not os.path.isfile("_state_enm_diversity.json"):
+                raise ValueError("beta restart requires _state_enm_diversity.json")
+            if not os.path.isfile("_state_enm_reservoir_modes.npy"):
+                raise ValueError("beta restart requires the saved reservoir")
+            with open("_state_enm_diversity.json") as stream:
+                metadata = json.load(stream)
+            state_cycle = metadata.pop('cycle')
+            state_cnt = metadata.pop('cnt')
+            checkpoint_hash = metadata.pop('checkpoint_sha256')
+            hashes = metadata.pop('state_sha256')
+            for name, digest in hashes.items():
+                if self._state_digest(name) != digest:
+                    raise ValueError(f"beta restart contains inconsistent state: {name}")
+            if checkpoint_hash is not None and self._state_digest('checkpoint.chk') != checkpoint_hash:
+                raise ValueError("beta checkpoint does not match saved adaptive state")
+            search = self._get_subspace_search_modes(
+                [int(x) for x in str(self.args.modes).split(',')])
+            expected = {"schema": 3,
+                        "beta": self._beta(),
+                        "beta_count": self._beta_count(),
+                        "alpha": self._alpha(),
+                        "active_modes": str(self.args.modes),
+                        "search_modes": search,
+                        "metric": "mass-weighted/current-md-frame-v1"}
+            if metadata.get("schema") == 2 and len(str(self.args.modes).split(",")) == 3:
+                metadata = {"beta_count": 3, **metadata, "schema": 3}
+            if metadata != expected:
+                raise ValueError("beta restart state differs from saved configuration")
+            self._enm_reservoir_modes = np.load("_state_enm_reservoir_modes.npy")
+            if self._enm_basis_modes is None or self._enm_basis_ref_pos_nm is None:
+                raise ValueError("beta restart requires both active basis and reference")
+            n_sel = len(self._enm_selection_atoms())
+            m = len(str(self.args.modes).split(","))
+            if self._enm_basis_modes.shape != (m, n_sel, 3) or \
+                    not np.isfinite(self._enm_basis_modes).all():
+                raise ValueError("invalid active basis in beta restart state")
+            if self._enm_reservoir_modes.shape != (len(search), n_sel, 3) or \
+                    not np.isfinite(self._enm_reservoir_modes).all():
+                raise ValueError("invalid reservoir in beta restart state")
+
         with open("correction_state.json") as fh:
             cs = json.load(fh)
+        if self._diversity_enabled() and (cs['cycle'] != state_cycle or cs['cnt'] != state_cnt):
+            raise ValueError("beta scalar state does not match the sealed adaptive state")
         return cs['cycle'], cs['cnt'], cs['qrms_correc']
+
+    # ------------------------------------------------------------------ #
+    # Replica driver                                                      #
+    # ------------------------------------------------------------------ #
 
     def run_simulation(self, rep: int, start_loop: int, end_loop: int,
                        correction_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Run (or resume) an aMDeNM replica entirely within OpenMM.
 
-        All MD state lives in the OpenMM Context between cycles.
-        Per-cycle coordinate/velocity/box files are never written; the DCD
-        trajectory and OpenMM checkpoints serve as the persistent record.
-
         Args:
             rep (int): Replica index (1-based).
             start_loop (int): 0 for a fresh run; last completed cycle for restart.
             end_loop (int): Total number of cycles to reach.
-            correction_state (dict, optional): Ignored — state is loaded from disk on restart.
+            correction_state (dict, optional): Kept for call-site compatibility;
+                state is loaded from disk on restart.
 
         Returns:
-            dict with keys 'cnt' and 'qrms_correc' (backward-compat with main()).
+            dict with keys 'cnt' and 'qrms_correc'.
         """
         rep_dir = f"{self.cwd}/rep{rep}"
 
-        # Excitation atoms: ENM representative atoms within the user selection
-        # Use the pre-built reference Universe instead of re-reading NAMD binary.
         _sel   = self._enm_selection_atoms()
         sel_ix: np.ndarray     = _sel.ix        # (n_sel,) system atom indices
         sel_masses: np.ndarray = _sel.masses    # (n_sel,) amu
-        n_sel: int             = len(sel_ix)
         del _sel
 
         if getattr(self.args, 'recalc', False):
             self._validate_enm_selection(sel_ix)
-        self._log_memory(f"replica {rep} start")
 
         ## == NEW RUN == ##
         if start_loop == 0:
@@ -541,33 +692,22 @@ class SimulationRunner:
             os.makedirs(rep_dir, exist_ok=True)
             os.chdir(rep_dir)
 
-            # The runner is shared by all replicas, so correction state left by
-            # the previous replica must not carry over: every replica starts with
-            # the initial RMS window and no stale average structure.
+            # The runner is shared by all replicas: every replica starts with the
+            # initial RMS window, no average structure and no stale ENM basis.
             self.qrms_correc = self.globfreq
             self._avg_pos_nm = None
+            self._enm_basis_modes = None
+            self._enm_basis_ref_pos_nm = None
+            self._enm_reservoir_modes = None
 
-            # DAVID - temporary validation logging: reinjection monitoring
-            reinjection_count = 0
-            reinjection_log = "reinjection_events.out"
-            with open(reinjection_log, "w") as f:
-                f.write(
-                    "# cycle time_ps ek_before_kcal_mol "
-                    "target_ek_kcal_mol reason\n"
-                )
-            # DAVIDEND
-
-            # Read combination vector
             vec_file = f"{self.cwd}/rep-struct-list/rep{rep}_vector.vec"
             shutil.copy(vec_file, "pff_vector.vec")   # traceability copy
             q_vec_full = NAMDInputReader.read_nm_vector(self.psffile, vec_file)
             q_vec_sel  = q_vec_full[sel_ix]           # selection subset, Å
 
-            # Compute excitation velocity (AKMA units, selection subset)
-            exc_vel_sel = self.mode_exciter.excite(q_vec_sel, self.energy, sel_masses)
+            exc_vel_sel = self._excite_control_vector(q_vec_sel, self.energy, sel_masses)
             print(f"{self.console.PGM_NAM}Writing the excitation vector with a Ek injection of {self.console.EXT}{self.energy}{self.console.STD} kcal/mol.")
 
-            # Convert AKMA to nm/ps and ADD to initial velocities
             exc_vel_nm_ps = exc_vel_sel * AKMA_VEL_TO_NM_PS
             replica_velocities_nm_ps = self._init_state.velocities_nm_ps.copy()
             replica_velocities_nm_ps[sel_ix] += exc_vel_nm_ps
@@ -577,16 +717,11 @@ class SimulationRunner:
                 box_vectors_nm=self._init_state.box_vectors_nm,
             )
 
-            # Store full-system excitation vector (AKMA) for potential rescaling
             self._cntrl_vec    = np.zeros((self.n_atoms, 3))
             self._cntrl_vec[sel_ix] = q_vec_sel
             self._exc_vel_akma = np.zeros((self.n_atoms, 3))
             self._exc_vel_akma[sel_ix] = exc_vel_sel
 
-            # Write the combination and the excited vector (full-system arrays,
-            # so that the selected atoms land on their own rows)
-            # cntrl_vector.vec: unit direction vector Q (used for projections each loop)
-            # excitation.vel:   velocity-scaled vector actually added to the NAMD velocities
             self.mode_exciter._write_vector(self._cntrl_vec, "cntrl_vector.vec", self.sys_coor)
             self.mode_exciter._write_vector(self._exc_vel_akma, "excitation.vel", self.sys_coor)
 
@@ -596,29 +731,25 @@ class SimulationRunner:
                 shutil.copy("cntrl_vector.vec", "cntrl_vector.vec.1")
                 shutil.copy("excitation.vel", "excitation.vel.1")
 
-            # Initialise position caches and correction references
             self._curr_pos_nm       = self._init_pos_nm.copy()
             self._prev_pos_nm       = self._init_pos_nm.copy()
             self._correc_ref_pos_nm = self._init_pos_nm.copy()
             self._align_ref_pos_nm  = self._init_pos_nm.copy()
 
-            # Establish the initial ENM subspace U_m once, on the excitation
-            # atoms. This does not alter the OpenMM system.
             if self._is_harmonized():
-                nm_list = [int(s) for s in self.args.modes.split(',')]
+                nm_list = [int(s) for s in str(self.args.modes).split(',')]
                 self._initialize_enm_subspace(nm_list, sel_ix)
 
             loop = 0
             cnt  = 1
             vp, ek, qp, rmsp = [], [], [], []
 
-            # Create a fresh OpenMM engine for this replica
             engine = OpenMMSimulationEngine(
                 self.console, self._psf_omm, self._omm_system,
                 self._temperature,
                 platform_name=self._platform,
                 n_threads=self._n_threads,
-                device_index=0,          # use GPU 0 for all replicas
+                device_index=0,
                 rep_num=rep,
                 is_restart=False,
                 full_ener=getattr(self.args, 'full_ener', False),
@@ -631,32 +762,15 @@ class SimulationRunner:
         else:
             os.chdir(rep_dir)
 
-            # The runner is shared by all replicas: drop any subspace left by a
-            # previous replica; it is reloaded from disk below if this replica has one.
             self._enm_basis_modes      = None
             self._enm_basis_ref_pos_nm = None
-
-            # DAVID - temporary validation logging: reinjection monitoring on restart
-            reinjection_log = "reinjection_events.out"
-            if os.path.exists(reinjection_log):
-                with open(reinjection_log) as f:
-                    reinjection_count = sum(
-                        1 for line in f
-                        if line.strip() and not line.startswith("#")
-                    )
-            else:
-                reinjection_count = 0
-                with open(reinjection_log, "w") as f:
-                    f.write(
-                        "# cycle time_ps ek_before_kcal_mol "
-                        "target_ek_kcal_mol reason\n"
-                    )
-            # DAVIDEND
+            self._enm_reservoir_modes  = None
 
             try:
                 loop, cnt, self.qrms_correc = self._load_correction_state()
             except FileNotFoundError:
-                # Fallback: scalar-only state (legacy JSON without .npy files)
+                if self._diversity_enabled():
+                    raise RuntimeError("beta restart is incomplete; refusing legacy reinitialization")
                 if correction_state and os.path.exists("correction_state.json"):
                     with open("correction_state.json") as fh:
                         cs = json.load(fh)
@@ -666,11 +780,10 @@ class SimulationRunner:
                     print(f"{self.console.PGM_WRN}No .npy state files found for "
                           f"replica {rep}. In-memory vectors re-initialised from "
                           f"combination file.")
-                    # Re-initialise vectors from vec file using the reference Universe
                     vec_file = f"{self.cwd}/rep-struct-list/rep{rep}_vector.vec"
                     q_vec_full = NAMDInputReader.read_nm_vector(self.psffile, vec_file)
                     q_vec_sel  = q_vec_full[sel_ix]
-                    exc_vel_sel = self.mode_exciter.excite(q_vec_sel, self.energy, sel_masses)
+                    exc_vel_sel = self._excite_control_vector(q_vec_sel, self.energy, sel_masses)
                     self._cntrl_vec    = np.zeros((self.n_atoms, 3))
                     self._cntrl_vec[sel_ix] = q_vec_sel
                     self._exc_vel_akma = np.zeros((self.n_atoms, 3))
@@ -682,13 +795,15 @@ class SimulationRunner:
                         f"Cannot restart {self.console.ERR}Replica {rep}{self.console.STD}: correction_state.json missing."
                     )
 
-            # DCD SYNC
-            # Read frame count directly from the DCD binary header (topology-independent)
-            # to avoid atom-count mismatch errors from mda.Universe.
+            # DCD SYNC: one frame per cycle; the DCD header gives the frame count
+            # without needing a topology.
             dcd_path = f"rep{rep}.dcd"
             if os.path.exists(dcd_path):
                 n_dcd_frames = _count_dcd_frames(dcd_path)
                 if n_dcd_frames > 0:
+                    if self._diversity_enabled() and n_dcd_frames != loop:
+                        raise ValueError("beta DCD/checkpoint/state cycles differ; "
+                                         "refusing implicit synchronization")
                     if n_dcd_frames > loop:
                         print(f"{self.console.PGM_NAM}DCD sync: advancing loop from "
                               f"{self.console.WRN}{loop}{self.console.STD} to {self.console.EXT}{n_dcd_frames}{self.console.STD} "
@@ -706,7 +821,6 @@ class SimulationRunner:
             self._curr_pos_nm = self._init_pos_nm.copy()
             self._prev_pos_nm = self._init_pos_nm.copy()
 
-            # Reload projection lists accumulated in the previous run
             vp, ek, qp, rmsp = [], [], [], []
             for fname, lst_name in [
                 ("vp-proj.out",   "vp"),
@@ -740,7 +854,7 @@ class SimulationRunner:
                 self._temperature,
                 platform_name=self._platform,
                 n_threads=self._n_threads,
-                device_index=0,          # use GPU 0 for all replicas
+                device_index=0,
                 rep_num=rep,
                 is_restart=True,
                 full_ener=getattr(self.args, 'full_ener', False),
@@ -754,9 +868,8 @@ class SimulationRunner:
                 )
             engine.load_checkpoint(chk)
 
-            # DCD APPEND
-            # Force currentStep to exactly loop * n_steps so the reporter
-            # fires on the very first simulation.step() call of the restart.
+            # Align the OpenMM step counter with the cycle count so the DCD and
+            # checkpoint reporters fire on the correct cycles after restart.
             _n_steps_per_cycle = getattr(self.args, 'n_steps', 50)
             _expected_step     = loop * _n_steps_per_cycle
             _chk_step          = engine.simulation.currentStep
@@ -766,7 +879,14 @@ class SimulationRunner:
                   f"OpenMM step {_chk_step} ({_chk_time_ps:.2f} ps, "
                   f"~cycle {_chk_cycle}); DCD/JSON cycle is {loop}.")
             if _chk_step != _expected_step:
+                if self._diversity_enabled():
+                    raise ValueError("beta checkpoint step differs from adaptive state")
                 engine.simulation.currentStep = _expected_step
+            if self._diversity_enabled():
+                loaded = engine.simulation.context.getState(getPositions=True)
+                self._curr_pos_nm = np.asarray(
+                    loaded.getPositions(asNumpy=True).value_in_unit(unit.nanometer)).copy()
+                self._prev_pos_nm = self._curr_pos_nm.copy()
 
         # ═══════════════════════════════════════════════════════════════════
         # MAIN SIMULATION LOOP
@@ -778,48 +898,30 @@ class SimulationRunner:
                   f"{self.console.EXT}step {self.console.WRN}{loop}{self.console.STD}/{self.console.EXT}{end_loop}{self.console.STD}...")
 
             if loop % 100 == 0:
-                self._log_memory(f"replica {rep} cycle {loop}")
 
-            # RUN MD CYCLE
             pos_nm, vel_nm_ps, box_nm = engine.run_cycle(self.args.n_steps, rep=rep, loop=loop)
 
             self._prev_pos_nm = self._curr_pos_nm.copy()
             self._curr_pos_nm = pos_nm
 
             # DIRECTION CORRECTION CHECK
-            # The rms_check measures how far the system has moved along Q since the
-            # last correction reference.  When it reaches qrms_correc, _correct_excitation_direction
-            # is called, which unconditionally advances the reference window and
-            # conditionally replaces Q (only when motion has diverged > 60° from Q).
-            # qrms_correc is incremented here (outer gate) so the window keeps growing
-            # even in cycles where the angle test does not trigger a replacement.
             if not self.args.no_correc and not self.args.fixed:
                 curr_sel  = self._curr_pos_nm[sel_ix]       * 10.0  # nm to Å
                 ref_sel   = self._correc_ref_pos_nm[sel_ix]  * 10.0
 
-                # Compute the difference and mass-weight the selected atoms only
-                # (qcurr - qref) * sqrt(m)
                 diff_corr   = ((curr_sel - ref_sel).T * np.sqrt(sel_masses)).T
-
-                # Read the excitation vector and expand to full-system shape
                 cntrl_sel   = self._cntrl_vec[sel_ix]
 
-                # Project the current coordinates onto Q
                 q_proj_chk  = np.sum(diff_corr * cntrl_sel)
                 rms_check   = np.sqrt((q_proj_chk ** 2) / np.sum(sel_masses))
 
-                # Correct the excitation direction or recompute ENM modes
                 if rms_check >= self.qrms_correc:
                     if getattr(self.args, 'recalc', False):
-                        nm_list = [int(s) for s in self.args.modes.split(',')]
+                        nm_list = [int(s) for s in str(self.args.modes).split(',')]
 
                         if self._is_harmonized():
-                            # The RMS gate opens the historical angular test; Q is
-                            # replaced only when that test is satisfied (Q_corr).
-                            # ENM recalculation and subspace harmonization extend
-                            # a TRUE correction, never an RMS-only event:
-                            # 1 correction = 1 ENM recalculation = 1 harmonization
-                            # = 1 Q_final.
+                            # Q is replaced only when the angular test is satisfied;
+                            # 1 correction = 1 ENM recalculation = 1 transport = 1 Q_final.
                             cnt_before = cnt
                             cnt = self._correct_excitation_direction(
                                 rep, loop, self._cntrl_vec, cnt,
@@ -828,122 +930,64 @@ class SimulationRunner:
                             if cnt > cnt_before:
                                 self._recompute_enm_modes(rep, loop, nm_list, cnt)
                         else:
-                            # Random method (3.4.0 behavior): the RMS gate alone
-                            # triggers ENM recomputation + random recombination.
+                            # Random method (3.4.0 behavior)
                             self._recompute_enm_modes(rep, loop, nm_list, cnt)
                             cnt += 1
                     else:
-                        # Otherwise, correct the Q vector
                         cnt = self._correct_excitation_direction(
                             rep, loop,
                             self._cntrl_vec, cnt,
                             sel_ix, sel_masses
                         )
-                    # Update the RMS threshold after a triggered window
                     self.qrms_correc += self.globfreq
 
-            # OBTAIN THE VELOCITIES AND KINETIC ENERGY PROJECTED ONTO Q
-            # Open the current velocities
+            # VELOCITIES AND KINETIC ENERGY PROJECTED ONTO Q
             vel_akma    = vel_nm_ps / AKMA_VEL_TO_NM_PS
             vel_akma_mw = (vel_akma.T * np.sqrt(self.sys_mass)).T
 
-            # Compute the scalar projection of velocity onto Q
             velo        = np.sum(vel_akma_mw * self._cntrl_vec)
-
-            # Compute the vectorial projection of velocity onto Q
             v_proj_akma = self._cntrl_vec * velo
-
-            # Kinetic energy along the excitation direction
             ek_vel      = 0.5 * np.sum(v_proj_akma ** 2)
 
             vp.append(f"{round(velo,   5)}\n")
             ek.append(f"{round(ek_vel, 5)}\n")
 
             # PROJECT THE COORDINATES ONTO Q
-            # Open the current and initial coordinates
             curr_sel_coor = self._curr_pos_nm[sel_ix] * 10.0    # nm to Å
             init_sel_coor = self._init_pos_nm[sel_ix]  * 10.0
 
-            # Mass-weight the displacement using only the selected atom masses
             diff_coor  = np.zeros((self.n_atoms, 3))
             diff_coor[sel_ix] = ((curr_sel_coor - init_sel_coor).T * np.sqrt(sel_masses)).T
 
-            # Scalar projection of displacement onto Q and RMS displacement
             q_proj_coor = np.sum(diff_coor * self._cntrl_vec)
             mrms        = np.sqrt((q_proj_coor ** 2) / np.sum(sel_masses))
             qp.append(f"{round(q_proj_coor, 5)}\n")
             rmsp.append(f"{round(mrms,       5)}\n")
 
-            # Skip EK rescaling for standard MDeNM
             if self.args.no_correc:
                 if loop % 10 == 0:
-                    self._save_correction_state(loop, cnt)
+                    self._save_cycle_state(loop, cnt, engine)
                 continue
 
-            # RESCALE KINETIC ENERGY ACCORDING TO VALUES PROJECTED ONTO VECTOR Q
-            # Re-excite the NM vector when ek is below the lower threshold (bottom),
-            # meaning the system has lost energy along Q (e.g. damped by friction).
-            # Reduce the injected energy when ek exceeds the upper threshold (top),
-            # preventing over-excitation that could distort the protein structure.
-            # Both thresholds are set to ±25% of the target excitation energy.
+            # RESCALE KINETIC ENERGY ALONG Q (±25% band around the target)
             if (ek_vel < self.bottom) or (ek_vel > self.top):
-                # DAVID - temporary validation logging: velocity reinjection
-                reinjection_count += 1
-                reason = "LOW" if ek_vel < self.bottom else "HIGH"
-                time_ps = loop * self.args.n_steps * 0.002
-
-                with open(reinjection_log, "a") as f:
-                    f.write(
-                        f"{loop:d} "
-                        f"{time_ps:.6f} "
-                        f"{ek_vel:.8f} "
-                        f"{self.energy:.8f} "
-                        f"{reason}\n"
-                    )
-
-                #print(
-                #    f"{self.console.PGM_NAM}Replica {rep}: excitation velocity "
-                #    f"reinjection #{reinjection_count} at {time_ps:.3f} ps "
-                #    f"(EkQ={ek_vel:.6f}, target={self.energy:.6f} kcal/mol, "
-                #    f"{reason})."
-                #)
-                # DAVIDEND
-
                 v_proj_akma_phys = (v_proj_akma.T / np.sqrt(self.sys_mass)).T  # Å/AKMA
-                # Compute the difference between the projected and the excitation velocities
-                # and then sum to the current velocities: Vnew = Vdyna + (VQ - Vp)
-                # This injects exactly the missing energy along Q without altering
-                # the orthogonal velocity components that drive thermal motion.
                 new_vel_akma     = vel_akma + (self._exc_vel_akma - v_proj_akma_phys)
                 engine.set_velocities(new_vel_akma * AKMA_VEL_TO_NM_PS)
 
-                # DAVID - temporary validation logging: EkQ immediately after reinjection
-                new_vel_mw = (new_vel_akma.T * np.sqrt(self.sys_mass)).T
-                new_velo = np.sum(new_vel_mw * self._cntrl_vec)
-                new_v_proj_akma = new_velo * self._cntrl_vec
-                ek_vel_after = 0.5 * np.sum(new_v_proj_akma ** 2)
-
-                #print(
-                #    f"{self.console.PGM_NAM}Replica {rep}: "
-                #    f"EkQ BEFORE={ek_vel:.8f} "
-                #    f"IMMEDIATE_AFTER={ek_vel_after:.8f} "
-                #    f"TARGET={self.energy:.8f}"
-                #)
-                ## DAVIDEND
-
             if loop % 10 == 0:
-                self._save_correction_state(loop, cnt)
+                self._save_cycle_state(loop, cnt, engine)
 
-        # Write projections into files
+        if self._diversity_enabled():
+            self._save_cycle_state(loop, cnt, engine)
+
         for data, tag in zip((vp, ek, qp, rmsp), ("vp", "ek", "coor", "rms")):
             with open(f"{tag}-proj.out", 'w') as fh:
                 fh.writelines(data)
 
-        # Release the OpenMM Context (host and GPU memory) before the next replica
         engine.close()
         del engine
         self._release_memory()
-        self._log_memory(f"replica {rep} end")
 
         return {'cnt': cnt, 'qrms_correc': self.qrms_correc}
 
@@ -955,12 +999,8 @@ class SimulationRunner:
         """
         Return the base name of the ENM computed by ``pyadmd run``.
 
-        Mirrors ``cmd_run``: the stem of the NAMD ``.coor`` file or of the
-        OpenMM ``.rst`` file given at run time. The ENM output of the initial
-        structure is in ``inputs/{base_name}_enm/``.
-
         Returns:
-            str: ENM base name.
+            str: Stem of the NAMD ``.coor`` or OpenMM ``.rst`` file.
         """
         if str(getattr(self.args, 'source', 'NAMD')).upper() == 'NAMD':
             path = self.args.coorfile
@@ -972,28 +1012,21 @@ class SimulationRunner:
         """
         Establish the initial active ENM subspace U_m.
 
-        All replicas start from the same structure, so U_m is read from the
-        ENM already computed by ``pyadmd run`` (``inputs/{base_name}_enm/``)
-        and reduced to the excitation atoms, instead of being recomputed in
-        every replica. The reference positions are the initial positions the
-        modes were computed on.
-
-        If those files are not available (e.g. a run directory created by an
-        older version), the ENM is computed on the current structure
-        (honoring ``--rtb``) as a fallback. The OpenMM system is not altered.
+        The ENM computed by ``pyadmd run`` (``inputs/{base_name}_enm/``) is
+        reduced to the excitation atoms. If it is missing, the ENM is computed
+        on the current structure. In beta mode the reservoir is initialized
+        instead (see ``_initialize_diversity_subspace``).
 
         Args:
-            nm_parsed (list[int]): Active mode numbers (defines the dimension m).
+            nm_parsed (list[int]): Active mode numbers (dimension m).
             sel_ix (np.ndarray): System indices of the excitation atoms.
 
         Raises:
             RuntimeError: If the basis atom count does not match ``sel_ix``.
-
-        Note:
-            On a restart without persisted basis files, this is also called
-            from ``_transport_q_through_enm_subspace``; U_m is then the
-            initial subspace, not the one reached after earlier corrections.
         """
+        if self._diversity_enabled():
+            self._initialize_diversity_subspace(nm_parsed, sel_ix)
+            return
         base_name = self._enm_base_name()
         try:
             self._enm_basis_modes = self._read_enm_basis(
@@ -1030,50 +1063,40 @@ class SimulationRunner:
               f"{self.console.EXT}{len(nm_parsed)}{self.console.STD} modes on "
               f"{self.console.EXT}{len(sel_ix)}{self.console.STD} selected atoms.")
 
-    def _get_subspace_search_modes(self, nm_parsed: List[int]) -> List[int]:
+    def _initialize_diversity_subspace(self, nm_parsed: List[int], sel_ix: np.ndarray) -> None:
         """
-        Return the larger ENM search space M used for subspace tracking.
-
-        ``-nm/--modes`` defines the active subspace m. The optional
-        ``--subspace-search-modes`` defines the search space M ⊇ m; when
-        absent, M = m.
+        Initialize the beta reservoir (M search modes) and the active basis U_m.
 
         Args:
-            nm_parsed (list[int]): Active mode numbers (dimension m).
-
-        Returns:
-            list[int]: Search-space mode numbers (dimension M ≥ m).
+            nm_parsed (list[int]): Active mode numbers.
+            sel_ix (np.ndarray): System indices of the excitation atoms.
 
         Raises:
-            ValueError: If the list is malformed, has duplicates, is smaller
-                than ``nm_parsed``, or does not contain every active mode
-                (normally caught earlier by the CLI parser).
+            ValueError: If the reservoir spectrum is unstable or near-singular.
         """
-        raw = getattr(self.args, "subspace_search_modes", None)
-        if raw is None or str(raw).strip() == "":
-            return list(nm_parsed)
-
-        try:
-            search_modes = [int(x.strip()) for x in str(raw).split(",") if x.strip()]
-        except ValueError as exc:
-            raise ValueError(
-                "--subspace-search-modes must be a comma-separated list of integers"
-            ) from exc
-
-        if len(search_modes) < len(nm_parsed):
-            raise ValueError(
-                f"subspace search space must satisfy M >= m; "
-                f"got M={len(search_modes)}, m={len(nm_parsed)}"
-            )
-        if len(set(search_modes)) != len(search_modes):
-            raise ValueError("--subspace-search-modes contains duplicate mode indices")
-        missing = [mode for mode in nm_parsed if mode not in search_modes]
-        if missing:
-            raise ValueError(
-                "the active modes given by -nm must be contained in "
-                f"--subspace-search-modes; missing: {missing}"
-            )
-        return search_modes
+        search = self._get_subspace_search_modes(nm_parsed)
+        base = "subspace_initial"
+        write_diversity_spectrum(
+            ENMCalculator(self.console),
+            positions_ang=self._curr_pos_nm * 10.0,
+            base_name=base,
+            nm_type=self.args.model.lower(),
+            search_modes=search,
+            input_dir=os.getcwd(),
+            psffile=self.psffile,
+            max_modes=max(50, max(search) + 1),
+            rtb=getattr(self.args, 'rtb', False),
+        )
+        reservoir, stiffness = self._read_diversity_spectrum(base, search, sel_ix)
+        eigenvalues = np.linalg.eigvalsh(stiffness)
+        if eigenvalues[-1] <= 0 or eigenvalues[0] <= 1e-8 * eigenvalues[-1]:
+            raise ValueError("initial beta reservoir contains unstable or near-zero internal modes")
+        self._enm_reservoir_modes = reservoir.copy()
+        self._enm_basis_modes = reservoir[[search.index(i) for i in nm_parsed]].copy()
+        self._enm_basis_ref_pos_nm = self._curr_pos_nm.copy()
+        print(f"{self.console.PGM_NAM}Beta reservoir initialized: {len(search)} directions; "
+              f"active modes {nm_parsed}; beta={self._beta()}, "
+              f"beta count={self._beta_count()}.")
 
     def _transport_q_through_enm_subspace(self, rep: int, loop: int,
                                           nm_parsed: List[int],
@@ -1084,24 +1107,18 @@ class SimulationRunner:
         """
         Track U_m inside V_M, harmonize it, and transport Q_corr.
 
-        Reads the recomputed search modes V_M, calls
-        ``harmonize_and_transport`` (Kabsch alignment, SVD of the overlap
-        S = U_m^T V_M, Procrustes harmonization, projection of Q_corr onto
-        V_harm, α-mixing), updates the in-memory excitation state, archives
-        Q_final, promotes V_harm to the new active subspace, and appends the
-        diagnostics ``subspace_overlap.csv`` and
-        ``subspace_matching_coefficients.csv``.
-
-        Reached only after a true angular correction, so the current
-        ``self._cntrl_vec`` is Q_corr.
+        U_m frame correction: the transported direction and the harmonized
+        basis come back in the frame of the stored reference. They are rotated
+        into the current MD frame before being stored, so that the basis and
+        its reference positions always share one frame.
 
         Args:
-            rep (int): Replica number (logging/diagnostics only).
+            rep (int): Replica number (diagnostics only).
             loop (int): Current cycle number.
             nm_parsed (list[int]): Active mode numbers (dimension m).
-            search_modes (list[int]): Search-space mode numbers (dimension M ≥ m).
-            cnt (int): Correction counter (already incremented for this correction).
-            base_name (str): Base name of the ENM run holding the V_M mode files.
+            search_modes (list[int]): Search-space mode numbers (dimension M >= m).
+            cnt (int): Correction counter (already incremented).
+            base_name (str): Base name of the ENM run holding the V_M files.
             sel_ix (np.ndarray): System indices of the excitation atoms.
             sel_masses (np.ndarray): Masses of the excitation atoms (amu).
 
@@ -1109,9 +1126,11 @@ class SimulationRunner:
             RuntimeError: If the search-space atom count does not match ``sel_ix``.
             ValueError: If ``--subspace-alpha`` is outside [0, 1].
         """
+        if self._diversity_enabled():
+            self._transport_diversity(rep, loop, nm_parsed, search_modes, cnt,
+                                      base_name, sel_ix, sel_masses)
+            return
         if self._enm_basis_modes is None or self._enm_basis_ref_pos_nm is None:
-            # Restart compatibility: establish U_m at the current structure
-            # when no persisted basis is available.
             self._initialize_enm_subspace(nm_parsed, sel_ix)
 
         new_modes = self._read_enm_basis(
@@ -1124,7 +1143,7 @@ class SimulationRunner:
             )
 
         q_old_sel = self._cntrl_vec[sel_ix]
-        alpha = float(getattr(self.args, 'subspace_alpha', 1.0))
+        alpha = self._alpha()
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"--subspace-alpha must be between 0 and 1; got {alpha}")
 
@@ -1138,11 +1157,17 @@ class SimulationRunner:
             alpha=alpha,
         )
 
+        # U_m frame correction: outputs are in the stored reference frame; rotate
+        # them into the current MD frame (same convention as the beta path).
+        back = result.rotation.T
+        result.q_new = result.q_new @ back
+        result.harmonized_modes = result.harmonized_modes @ back
+
         q_full = np.zeros((self.n_atoms, 3))
         q_full[sel_ix] = result.q_new
         self._cntrl_vec = q_full
 
-        exc_sel = self.mode_exciter.excite(result.q_new, self.energy, sel_masses)
+        exc_sel = self._excite_control_vector(result.q_new, self.energy, sel_masses)
         exc_full = np.zeros((self.n_atoms, 3))
         exc_full[sel_ix] = exc_sel
         self._exc_vel_akma = exc_full
@@ -1150,16 +1175,12 @@ class SimulationRunner:
         self.mode_exciter._write_vector(q_full, "cntrl_vector.vec", self.sys_coor)
         self.mode_exciter._write_vector(exc_full, "excitation.vel", self.sys_coor)
 
-        # Archive Q_final (never the intermediate Q_corr)
         shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
         shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
 
-        # The harmonized m-dimensional subspace becomes U_m for the next
-        # correction; the MD system is unchanged.
         self._enm_basis_modes = result.harmonized_modes.copy()
         self._enm_basis_ref_pos_nm = self._curr_pos_nm.copy()
 
-        # Diagnostics for m -> M subspace tracking
         diag = "subspace_overlap.csv"
         new_file = not os.path.exists(diag)
         with open(diag, "a", newline="") as fh:
@@ -1180,7 +1201,6 @@ class SimulationRunner:
                 alpha
             ])
 
-        # Coefficients of the M search modes in the m matched directions
         coeff_diag = "subspace_matching_coefficients.csv"
         coeff_new_file = not os.path.exists(coeff_diag)
         with open(coeff_diag, "a", newline="") as fh:
@@ -1204,6 +1224,119 @@ class SimulationRunner:
             f"sigma_min={result.singular_values.min():.4f}, alpha={alpha:.3f}."
         )
 
+    def _transport_diversity(self, rep: int, loop: int, nm_parsed: List[int],
+                             search_modes: List[int], cnt: int, base_name: str,
+                             sel_ix: np.ndarray, sel_masses: np.ndarray) -> None:
+        """
+        Beta update: transport the reservoir, add the transverse directions, and
+        store the new direction, active basis and reservoir in the current frame.
+
+        Args:
+            rep (int): Replica number (diagnostics only).
+            loop (int): Current cycle number.
+            nm_parsed (list[int]): Active mode numbers.
+            search_modes (list[int]): Reservoir mode labels.
+            cnt (int): Correction counter (already incremented).
+            base_name (str): ENM base name of the recomputed spectrum.
+            sel_ix (np.ndarray): System indices of the excitation atoms.
+            sel_masses (np.ndarray): Masses of the excitation atoms (amu).
+
+        Raises:
+            RuntimeError: If the reservoir or active basis is missing.
+        """
+        if self._enm_reservoir_modes is None or self._enm_basis_ref_pos_nm is None:
+            raise RuntimeError("beta update requires a persisted reservoir and reference")
+        new_modes, stiffness = self._read_diversity_spectrum(base_name, search_modes, sel_ix)
+        result = harmonize_with_diversity(
+            self._enm_basis_modes, new_modes, self._cntrl_vec[sel_ix],
+            self._enm_basis_ref_pos_nm[sel_ix] * 10.0,
+            self._curr_pos_nm[sel_ix] * 10.0, sel_masses,
+            self._alpha(), self._beta(),
+            self._enm_reservoir_modes, stiffness,
+            beta_count=self._beta_count(),
+        )
+        q = result.transport.q_new
+        excitation = self._excite_control_vector(q, self.energy, sel_masses)
+        self._cntrl_vec = np.zeros((self.n_atoms, 3))
+        self._exc_vel_akma = np.zeros((self.n_atoms, 3))
+        self._cntrl_vec[sel_ix] = q
+        self._exc_vel_akma[sel_ix] = excitation
+        self._enm_basis_modes = result.transport.harmonized_modes.copy()
+        self._enm_reservoir_modes = result.reservoir_modes.copy()
+        self._enm_basis_ref_pos_nm = self._curr_pos_nm.copy()
+
+        for array, filename in ((self._cntrl_vec, 'cntrl_vector.vec'),
+                                (self._exc_vel_akma, 'excitation.vel')):
+            self.mode_exciter._write_vector(array, filename, self.sys_coor)
+            shutil.copy(filename, f"{filename}.{cnt}")
+
+        np.savez(f"subspace_diversity_{cnt}.npz", schema=np.array(1),
+                 search_mode_labels=np.asarray(search_modes),
+                 selected=result.selected, excluded=result.excluded,
+                 coefficients=result.coefficients,
+                 projections=result.projections, transverse=result.transverse,
+                 stiffness=result.stiffness, scores=result.scores,
+                 overlap_active=result.overlap_active,
+                 reservoir_coefficients=result.reservoir_coefficients,
+                 modal_stiffness=stiffness,
+                 reservoir_singular_values=result.reservoir_singular_values,
+                 modal_coefficients=result.modal_coefficients)
+
+        path = "subspace_candidates.csv"
+        fresh = not os.path.exists(path)
+        with open(path, 'a', newline='') as stream:
+            writer = csv.writer(stream)
+            if fresh:
+                writer.writerow(['replica', 'cycle', 'correction', 'tracked_label',
+                                 'projection_Qc', 'transverse', 'stiffness', 'score',
+                                 'overlap_alpha', 'excluded', 'selected', 'coefficient'])
+            coefficients = dict(zip(result.selected, result.coefficients))
+            for j, label in enumerate(search_modes):
+                writer.writerow([rep, loop, cnt, label, result.projections[j],
+                                 result.transverse[j], result.stiffness[j], result.scores[j],
+                                 result.overlap_active[j], j in result.excluded,
+                                 j in result.selected, coefficients.get(j, 0.0)])
+
+        path = "subspace_diversity.csv"
+        fresh = not os.path.exists(path)
+        with open(path, 'a', newline='') as stream:
+            writer = csv.writer(stream)
+            if fresh:
+                writer.writerow(['replica', 'cycle', 'correction', 'alpha', 'beta',
+                                 'excluded_labels', 'selected_labels', 'coefficients',
+                                 'omega', 'sigma', 'angles_deg', 'deviation_deg',
+                                 'cosine_continuity', 'mixture_stiffness', 'cross_term',
+                                 'modal_participation', 'collectivity'])
+            labels = lambda indices: ';'.join(str(search_modes[i]) for i in indices)
+            values = lambda array: ';'.join(f'{x:.12g}' for x in array)
+            writer.writerow([rep, loop, cnt, self._alpha(), self._beta(),
+                             labels(result.excluded), labels(result.selected),
+                             values(result.coefficients), result.transport.omega,
+                             values(result.transport.singular_values),
+                             values(result.transport.principal_angles_deg),
+                             result.deviation_deg, result.cosine_continuity,
+                             result.mixture_stiffness, result.mixture_cross_term,
+                             result.modal_participation, result.collectivity])
+
+        path = "subspace_overlap.csv"
+        fresh = not os.path.exists(path)
+        with open(path, 'a', newline='') as stream:
+            writer = csv.writer(stream)
+            if fresh:
+                writer.writerow(['replica', 'cycle', 'correction', 'm', 'M', 'active_modes',
+                                 'search_modes', 'omega', 'sigma', 'angles_deg', 'alpha'])
+            writer.writerow([rep, loop, cnt, len(nm_parsed), len(search_modes),
+                             ';'.join(map(str, nm_parsed)), ';'.join(map(str, search_modes)),
+                             result.transport.omega,
+                             values(result.transport.singular_values),
+                             values(result.transport.principal_angles_deg), self._alpha()])
+
+        print(f"{self.console.PGM_NAM}Beta transport at cycle {loop}: "
+              f"alpha={self._alpha()}, beta={self._beta()}, "
+              f"selected tracked labels={labels(result.selected)}, "
+              f"deviation={result.deviation_deg:.3f} deg, "
+              f"cos(Qnew,Qc)={result.cosine_continuity:.6f}.")
+
     # ------------------------------------------------------------------ #
     # ENM recalculation                                                   #
     # ------------------------------------------------------------------ #
@@ -1212,39 +1345,27 @@ class SimulationRunner:
         """
         Recompute ENM modes and update Q, then release the memory used.
 
-        Thin wrapper around ``_recompute_enm_modes_impl`` that brackets the
-        recalculation with the opt-in memory log and returns freed memory to
-        the operating system afterwards (see ``_release_memory``).
-
         Args:
             rep (int): Replica number (logging only).
             loop (int): Current simulation cycle number.
             nm_parsed (list[int]): Active mode numbers.
             cnt (int): Current correction counter.
         """
-        self._log_memory(f"replica {rep} cycle {loop} ENM recalculation: before")
         try:
             self._recompute_enm_modes_impl(rep, loop, nm_parsed, cnt)
         finally:
             self._release_memory()
-            self._log_memory(f"replica {rep} cycle {loop} ENM recalculation: after")
 
     def _recompute_enm_modes_impl(self, rep: int, loop: int, nm_parsed: List[int], cnt: int) -> None:
         """
         Recompute ENM modes from the current structure and update Q.
 
-        Two methods, selected by ``--recalc-method``:
-
-          - ``random`` (default, 3.4.0 behavior): recompute the active modes
-            and draw a new random unit-vector combination of them
-            (``_generate_new_excitation_vector``).
-          - ``harmonized``: recompute the search space M ⊇ m and transport
-            Q_corr through the harmonized subspace
-            (``_transport_q_through_enm_subspace``).
-
-        Both honor ``--rtb`` in the ENM diagonalization. The structure used is
-        saved by ``ENMCalculator.compute_enm`` in
-        ``step_{loop}_enm/step_{loop}.pdb``.
+        Methods, selected by ``--recalc-method``:
+          - ``random`` (3.4.0/3.5.0 behavior): recompute the active modes and
+            draw a new random combination.
+          - ``harmonized``: recompute the search space M >= m and transport
+            Q_corr through the harmonized subspace. With beta > 0 the reservoir
+            spectrum is written instead, and the beta update is applied.
 
         Args:
             rep (int): Replica number (logging only).
@@ -1252,10 +1373,9 @@ class SimulationRunner:
             nm_parsed (list[int]): Active mode numbers.
             cnt (int): Current correction counter.
 
-        Note:
-            On failure the ``random`` method falls back to the standard
-            direction correction; the ``harmonized`` method keeps Q_corr
-            (already computed by the caller) and archives it.
+        Raises:
+            RuntimeError: In beta mode, if the ENM update fails (the reservoir
+                is never discarded silently).
         """
         console = ConsoleConfig()
         now = time.strftime("%H:%M:%S")
@@ -1276,22 +1396,33 @@ class SimulationRunner:
                   f"recomputing ENM modes at step {console.EXT}{loop}{console.STD} "
                   f"[method=random; active modes={nm_parsed}]...")
 
-        # compute_enm saves the structure it uses (protein/nucleic atoms) as
-        # step_{loop}_enm/step_{loop}.pdb; no separate full-system PDB is written.
         current_pos_ang = self._curr_pos_nm * 10.0   # nm to Å
         enm_calc = ENMCalculator(self.console)
         base_name = f"step_{loop}"
 
         try:
-            enm_calc.compute_enm(
-                positions_ang=current_pos_ang,
-                base_name=base_name,
-                nm_type=self.args.model.lower(),
-                nm_parsed=modes_to_compute,
-                input_dir=os.getcwd(),
-                psffile=self.psffile,
-                rtb=getattr(self.args, 'rtb', False)
-            )
+            if self._diversity_enabled():
+                write_diversity_spectrum(
+                    enm_calc,
+                    positions_ang=current_pos_ang,
+                    base_name=base_name,
+                    nm_type=self.args.model.lower(),
+                    search_modes=modes_to_compute,
+                    input_dir=os.getcwd(),
+                    psffile=self.psffile,
+                    max_modes=max(50, max(modes_to_compute) + 1),
+                    rtb=getattr(self.args, 'rtb', False),
+                )
+            else:
+                enm_calc.compute_enm(
+                    positions_ang=current_pos_ang,
+                    base_name=base_name,
+                    nm_type=self.args.model.lower(),
+                    nm_parsed=modes_to_compute,
+                    input_dir=os.getcwd(),
+                    psffile=self.psffile,
+                    rtb=getattr(self.args, 'rtb', False)
+                )
 
             if harmonized:
                 sel_sub = self._enm_selection_atoms()
@@ -1307,17 +1438,17 @@ class SimulationRunner:
                       f"{console.EXT}Replica {rep}{console.STD}.\n")
 
         except Exception as e:
+            if self._diversity_enabled():
+                raise RuntimeError("beta ENM update failed; refusing to erase reservoir memory") from e
             print(f"{self.console.PGM_ERR}ENM recomputation failed [method={method}]: "
                   f"{self.console.ERR}{e}{self.console.STD}")
             if harmonized:
-                # Q_corr was already produced by the angular test: keep it, do
-                # not correct twice, and archive it so that every true correction
-                # leaves exactly one archived vector.
+                # Q_corr was already produced by the angular test: keep it and
+                # archive it, so every true correction leaves one archived vector.
                 for src in ("cntrl_vector.vec", "excitation.vel"):
                     if os.path.exists(src):
                         shutil.copy(src, f"{src}.{cnt}")
             else:
-                # Fall back to standard direction correction
                 _sel_fb = self._enm_selection_atoms()
                 self._correct_excitation_direction(
                     rep, loop, self._cntrl_vec, cnt,
@@ -1330,72 +1461,53 @@ class SimulationRunner:
         """
         Build a new excitation vector from recomputed ENM mode files (random method).
 
-        Reads the mode vectors for the excitation atoms, combines them with a
-        random unit vector, normalises the result, and writes the new control
-        vector (``cntrl_vector.vec``) and excitation velocity
-        (``excitation.vel``) as full-system arrays. Updates the in-memory
-        state (``_cntrl_vec``, ``_exc_vel_akma``) and archives the previous
-        vector files.
-
         Args:
             rep (int): Replica number (logging only).
             loop (int): Current simulation cycle (logging only).
-            nm_parsed (list[int]): Mode numbers to combine (e.g. [7, 8, 9]).
+            nm_parsed (list[int]): Mode numbers to combine.
             rep_dir (str): Absolute path to the replica working directory.
             cnt (int): Current correction counter, used to archive old vector files.
-            base_name (str): Base name of the temporary PDB used for the ENM
-                recomputation; the ENM output folder is ``{base_name}_enm``.
+            base_name (str): Base name of the recomputed ENM run.
 
         Raises:
             FileNotFoundError: If a mode file is missing.
             RuntimeError: If the combined vector has zero norm.
-
-        Note:
-            The combined vector is built from the *written mode vector files*,
-            which are already in full Cartesian space whether or not the ENM
-            used RTB (see ``ENMCalculator.compute_enm``).
         """
         console = ConsoleConfig()
         print(f"{console.PGM_NAM}Generating new random factors for ENM recombination.")
 
         enm_dir = os.path.join(rep_dir, f"{base_name}_enm")
 
-        # Excitation atoms and their mode vectors
         sel_atoms  = self._enm_selection_atoms()
         sel_ix     = sel_atoms.ix
         sel_masses = sel_atoms.masses
         basis = self._read_enm_basis(base_name, nm_parsed, rep_dir, sel_ix=sel_ix)
+        comb_vec = np.tensordot(factors, basis, axes=(0, 0))
 
-        # Generate random unit-vector coefficients (N-dimensional hypersphere)
         n_modes = len(nm_parsed)
         factors = np.random.normal(size=n_modes)
         factors = factors / np.linalg.norm(factors)
 
-        comb_vec = np.tensordot(factors, basis, axes=(0, 0))
         comb_norm = np.linalg.norm(comb_vec)
         if comb_norm < 1.0e-15:
             raise RuntimeError("Random ENM recombination produced a zero excitation vector.")
         comb_vec /= comb_norm
 
-        # Rename previous excitation vector files
         if os.path.exists("excitation.vel"):
             shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
         if os.path.exists("cntrl_vector.vec"):
             shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
 
-        # Map the new control vector to the full system and write it
         self._cntrl_vec = np.zeros((self.n_atoms, 3))
         self._cntrl_vec[sel_ix] = comb_vec
         self.mode_exciter._write_vector(self._cntrl_vec, "cntrl_vector.vec", self.sys_coor)
 
-        # Compute excitation velocity (AKMA units)
-        exc_vec_sel = self.mode_exciter.excite(comb_vec, self.energy, sel_masses)
+        exc_vec_sel = self._excite_control_vector(comb_vec, self.energy, sel_masses)
         exc_vec_full = np.zeros((self.n_atoms, 3))
         exc_vec_full[sel_ix] = exc_vec_sel
         self._exc_vel_akma = exc_vec_full.copy()
         self.mode_exciter._write_vector(exc_vec_full, "excitation.vel", self.sys_coor)
 
-        # Save the combination factors to a CSV file
         factors_csv = os.path.join(enm_dir, f"recalc_factors_{cnt}.csv")
         with open(factors_csv, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -1409,101 +1521,77 @@ class SimulationRunner:
                                       sel_ix: np.ndarray,
                                       sel_masses: np.ndarray) -> int:
         """
-        Update the excitation vector direction based on the observed structural displacement.
+        Update the excitation direction from the observed structural displacement.
 
-        Computes the mass-weighted average structure between the previous and current steps,
-        aligns it to the reference, and projects the resulting displacement onto the current
-        control vector Q. If the cosine of the angle between the displacement and Q falls
-        below the adaptive threshold (cos_alpha), the excitation direction is replaced by
-        the normalized displacement vector (Q_corr) and the energy injection is re-applied.
-
-        This is the core aMDeNM adaptive correction step: it steers the excitation along
-        the direction the protein is actually moving, rather than persisting with the
-        original mode combination.
+        Computes the mass-weighted average structure over the last two frames,
+        aligns it to the reference, and projects the displacement onto the
+        current control vector Q. If the cosine falls below ``cos_alpha``, the
+        direction is replaced by the normalized displacement (Q_corr). In beta
+        mode the displacement is rotated back into the MD frame first.
 
         Args:
             rep (int): Replica number (logging only).
             loop (int): Current cycle number (logging only).
-            cntrl_vec (np.ndarray): Full-system Q vector (Å, shape N×3).
+            cntrl_vec (np.ndarray): Full-system Q vector, shape (N, 3).
             cnt (int): Correction counter; incremented when Q is replaced.
-            sel_ix (np.ndarray): Pre-computed atom indices of the selection subset.
-            sel_masses (np.ndarray): Pre-computed masses of selected atoms (amu).
+            sel_ix (np.ndarray): Indices of the selection subset.
+            sel_masses (np.ndarray): Masses of the selected atoms (amu).
 
         Returns:
-            cnt (int): Updated correction counter.
-
-        Note:
-            In harmonized mode the previous vectors are not archived here:
-            only Q_final is archived, after the subspace transport.
+            int: Updated correction counter.
         """
         n_atoms = self.sys_coor.atoms.n_atoms
 
-        # Compute the average structure of the last excitation using the selected atoms only.
-        # Averaging two consecutive frames reduces single-step noise before alignment.
         avg_sel_nm  = (self._curr_pos_nm[sel_ix] + self._prev_pos_nm[sel_ix]) / 2.0
         avg_full_nm = self._curr_pos_nm.copy()
         avg_full_nm[sel_ix] = avg_sel_nm
         self._avg_pos_nm = avg_full_nm
 
-        # Align the averaged current structure onto the correction reference frame
-        # (Kabsch rotation) to remove rigid-body drift before computing displacement.
         ref_positions_ang = self._align_ref_pos_nm[sel_ix] * 10.0   # nm to Å
         avg_sel_ang       = avg_sel_nm * 10.0                       # nm to Å
         aligned_avg_ang   = _kabsch_align(avg_sel_ang, ref_positions_ang, sel_masses)
 
-        # Mass-weighted displacement (unnormalised, selection-subset)
         diff_sub = ((aligned_avg_ang - ref_positions_ang).T * np.sqrt(sel_masses)).T
+        if self._diversity_enabled():
+            # Beta convention: the direction is stored in the current MD frame.
+            rotation = kabsch_rotation(avg_sel_ang, ref_positions_ang, sel_masses)
+            diff_sub = diff_sub @ rotation.T
 
-        # Full-system vector for dot-product with the full-system cntrl_vec
         diff = np.zeros((n_atoms, 3))
         diff[sel_ix] = diff_sub
         norm_diff = np.linalg.norm(diff)
 
-        # Set the average structure as the new reference for the next steps
         self._align_ref_pos_nm = avg_full_nm.copy()
 
         if norm_diff < 1e-10:
-            return cnt   # no meaningful displacement
+            return cnt
 
         diff_norm = diff / norm_diff
-
-        # Project onto current control vector
         dotp = np.sum(diff_norm * cntrl_vec)
 
-        # dotp is the cosine of the angle between the observed displacement and Q.
-        # If it falls below cos_alpha (default 0.5, i.e. >60°), the protein is moving
-        # away from the current excitation direction and a correction is needed.
         if dotp <= self.cos_alpha:
-            # Advance the RMS-gate reference
             self._correc_ref_pos_nm = self._curr_pos_nm.copy()
 
-            # Archive previous disk files for traceability (harmonized mode
-            # archives only Q_final, after the subspace transport)
             if not self._is_harmonized():
                 if os.path.exists("excitation.vel"):
                     shutil.copy("excitation.vel",   f"excitation.vel.{cnt}")
                 if os.path.exists("cntrl_vector.vec"):
                     shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
 
-            # Write the corrected Q (normalised full-system vector)
             self.mode_exciter._write_vector(diff_norm, "cntrl_vector.vec", self.sys_coor)
             now = time.strftime("%H:%M:%S")
             print(f"{self.console.PGM_NAM}{now} {self.console.EXT}Replica {rep}"
                   f"{self.console.STD}: wrote corrected excitation vector "
                   f"(cosα={dotp:.3f}, cnt={cnt}).")
 
-            # Compute new excitation velocity
-            exc_vec_sub  = self.mode_exciter.excite(diff_sub, self.energy, sel_masses)
+            exc_vec_sub  = self._excite_control_vector(diff_sub, self.energy, sel_masses)
             exc_vec_full = np.zeros((n_atoms, 3))
             exc_vec_full[sel_ix] = exc_vec_sub
             self.mode_exciter._write_vector(exc_vec_full, "excitation.vel", self.sys_coor)
 
-            # Update in-memory state; EK-rescaling in the main loop will inject
-            # the new velocity into the OpenMM Context on the next out-of-band cycle.
             self._cntrl_vec    = diff_norm.copy()
             self._exc_vel_akma = exc_vec_full.copy()
 
-            cnt += 1                # advance the correction counter
-            self.qrms_correc = 0    # reset threshold window
-
+            cnt += 1
+            self.qrms_correc = 0
         return cnt
