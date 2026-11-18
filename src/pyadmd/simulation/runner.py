@@ -1537,11 +1537,12 @@ class SimulationRunner:
         sel_ix     = sel_atoms.ix
         sel_masses = sel_atoms.masses
         basis = self._read_enm_basis(base_name, nm_parsed, rep_dir, sel_ix=sel_ix)
-        comb_vec = np.tensordot(factors, basis, axes=(0, 0))
 
         n_modes = len(nm_parsed)
         factors = np.random.normal(size=n_modes)
         factors = factors / np.linalg.norm(factors)
+
+        comb_vec = np.tensordot(factors, basis, axes=(0, 0))
 
         comb_norm = np.linalg.norm(comb_vec)
         if comb_norm < 1.0e-15:
